@@ -1,0 +1,3259 @@
+// ==UserScript==
+// @name         Автолайф: заявка -> заказ на CargoRun
+// @namespace    autolife.cargorun.orderbot
+// @version      1.27.41
+// @description  Теперь скрипт распространяется через GitHub (goldenman1984/autolife-order-bot) с автообновлением - Tampermonkey сам подхватывает новые версии, переустанавливать вручную у каждого логиста не нужно. Вставляешь сообщение от логиста (текст) - скрипт распознаёт маршрут/цену/дату/ТС и сам заполняет форму "Новый заказ" на loads.cargorun.ru. По умолчанию финальный клик "Запустить в работу"/"Сохранить черновик" всегда делает человек; по явным галочкам и подтверждению скрипт может сам нажать "Запустить в работу" и/или "Синхронизировать" с АТИ. Кнопка "Запустить в работу" (и своя, и настоящая на сайте) всегда заблокирована, если дата погрузки не прошла проверку на правдоподобность. При количестве ТС больше 1 галочки "Запустить в работу" и "Синхронизировать с АТИ" в окне заявки недоступны (сайт не поддерживает запуск в работу для нескольких ТС сразу) - если были включены, автоматически снимаются; в этом случае заказ сохраняется на сайте как черновик вручную. Для Москвы и Санкт-Петербурга без точного адреса подставляется известный адрес по умолчанию, а если точный адрес есть в самом сообщении - ИИ-разбор теперь использует именно его (в списке "Несколько заказов" при этом показывается короткое название города, а не весь адрес). Поле "Тип груза" заполняется из закрытого списка сайта (с запасным вариантом "ТНП"). ИИ-разбор (YandexGPT) выдерживает сообщения с большим числом отдельных заказов сразу (например, прайс-лист на много направлений). Комментарий на сайте больше не содержит цифру с ценой (её видит перевозчик/водитель) - включая "голую" цену без "тр"/"руб"/"ндс" рядом. Расчёт расстояния маршрута теперь устойчивее к временным сбоям геокодера и объясняет причину в логе, если не удалось. При включённой галочке "Синхронизировать с АТИ" отображение заказа выставляется "Всем перевозчикам" вместо "Выбранным перевозчикам". Два дня недели подряд через дефис без чисел ("на чт-пт"), а теперь и два числа дня подряд через дефис с одним месяцем на двоих ("02-03.10"), распознаются как ОКНО для погрузки (годится любой из двух дней), а не как пара дат погрузка/выгрузка - и в обычном разборе, и через ИИ; если после такого окна в сообщении отдельно названа ещё одна дата (например "02-03.10 ... 06.10") - именно она берётся как дата выгрузки, а не второе число окна. При 3+ точках маршрута (погрузка + несколько точек выгрузки) дата каждой следующей точки выгрузки считается по расстоянию от ПРЕДЫДУЩЕЙ точки маршрута последовательно (а не одним прыжком от погрузки сразу до последней точки). Время на КАЖДОЙ точке выгрузки (включая единственную точку) считается по расстоянию перегона (700 км/сутки), часовому поясу места прибытия и времени на ПРР на предыдущей точке (по умолчанию 4ч - на столько позже фактического прибытия машина трогается дальше), а не копируется время погрузки; расчётное время вне разумного окна разгрузки [8:00, 19:00) выравнивается на границу этого окна (вечер/ночь - 8:00 следующего дня, раннее утро - 8:00 того же дня). В окне заявки появилось поле "Тип загрузки" (Задняя/Боковая/Верхняя/Полная растентовка, взаимоисключающие галочки, "Задняя" по умолчанию) - выбор автоматически проставляется на сайте в поле "Выберите тип загрузки" ТОЛЬКО в первой точке маршрута (точке погрузки); если отмечен тип прицепа Рефрижератор или Изотерм - тип загрузки можно выбрать только "Задняя" (остальные варианты блокируются). Вариант типа прицепа, который раньше назывался в окне заявки просто "Тент", теперь называется "Тент 92м3" (на сайте по-прежнему подставляется просто "Тент" - это название не менялось). "Тент 110 м3" теперь несовместим ни с одним другим типом прицепа - отметка любого другого типа (Тент 92м3/Рефрижератор/Изотерм) автоматически снимает "Тент 110 м3", и наоборот; остальные типы между собой по-прежнему можно комбинировать. Для даты погрузки, когда в сообщении названо ОКНО из двух дней (диапазон дней недели "чт-пт", числовой диапазон "02-03.10" или обычное "или" между двумя датами), скрипт использует настоящий интервал на сайте (галочка "Выбрать период прибытия" + поле "Дата въезда, до") вместо того, чтобы подставлять одну "ближайшую" дату - теперь это работает И через ИИ-разбор (YandexGPT), а не только при обычном разборе; дата "до" интервала ставится с временем 19:00 (а не временем погрузки, как раньше).
+// @match        https://loads.cargorun.ru/*
+// @run-at       document-idle
+// @updateURL    https://raw.githubusercontent.com/goldenman1984/autolife-order-bot/main/autolife-order-bot.user.js
+// @downloadURL  https://raw.githubusercontent.com/goldenman1984/autolife-order-bot/main/autolife-order-bot.user.js
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      llm.api.cloud.yandex.net
+// @grant        unsafeWindow
+// @require      https://cdn.jsdelivr.net/npm/tz-lookup@6.1.25/tz.js
+// @noframes
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // Tampermonkey запускает скрипт в "песочнице": переменная window внутри
+  // скрипта - это обёртка, а не настоящий объект окна страницы. Для большинства
+  // вещей это не важно, но браузер отказывается принимать такую обёртку там,
+  // где по спецификации нужен именно настоящий Window (например, свойство
+  // view у MouseEvent) - выдаёт "Failed to convert value to 'Window'".
+  // unsafeWindow - это и есть настоящее окно страницы; используем его везде,
+  // где идёт речь о конструировании нативных браузерных объектов.
+  const REAL_WINDOW = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+  /* =========================================================================
+   *  0. НАСТРОЙКИ ПО УМОЛЧАНИЮ
+   *  Значения, которых нет в коротком сообщении логиста, берём отсюда.
+   *  Их можно поменять через меню Tampermonkey ("Настройки заявки") -
+   *  правки сохраняются в браузере каждого логиста (GM_setValue) и не
+   *  требуют правки кода.
+   * ========================================================================= */
+  const DEFAULTS_SCHEMA = {
+    cargoType: 'ТНП',          // тип груза по умолчанию, если в сообщении не назван другой
+    cargoWeight: 20,           // тонн, если вес не указан в сообщении
+    cargoVolumeM3: 90,         // м3, если объём не указан в сообщении
+    cargoCost: 2000000,        // стоимость груза, руб (для документов/страховки)
+    invitedFleetPrice: 1,      // "Ставка перевозчика" - ЗАПАСНОЕ значение на случай, если цена клиента не
+                               // распознана (обычно поле считается автоматически: -10% от цены клиента,
+                               // округлённые вниз до 1000 руб - см. computeInvitedFleetPrice)
+    ndsDefault: true,          // true = с НДС (сайт по умолчанию уже "НДС 22%")
+    defaultTime: '09:00',      // если время погрузки не указано в сообщении
+    contactName: '',           // ФИО диспетчера - подставляется в "Другое" -> Контактное лицо
+    contactPhone: '',          // телефон диспетчера, формат +7XXXXXXXXXX
+    dailyRangeKm: 700,         // пробег в сутки - по нему считается дата прибытия на выгрузку
+    roadFactor: 1.3,           // поправка "по прямой" -> "по дорогам" для оценки км маршрута
+    loadUnloadHours: 4,        // время на ПРР (погрузо-разгрузочные работы) на каждой точке - на столько
+                               // часов позже фактического времени прибытия машина трогается дальше по
+                               // маршруту (см. computeArrivalTime)
+    yandexApiKey: '',         // API-ключ YandexGPT (Api-Key) - НЕ храните здесь в коде! Вводится через меню
+                               // Tampermonkey "Настройки YandexGPT" и остаётся только в браузере этого логиста.
+    yandexFolderId: '',       // Folder ID каталога Yandex Cloud (в консоли console.yandex.cloud - это id
+                               // КАТАЛОГА, а не id облака; часто называется "default").
+    yandexModel: 'yandexgpt-5.1', // модель YandexGPT (используется как gpt://<FolderID>/<модель>)
+  };
+
+  function getSettings() {
+    const saved = GM_getValue('orderBotSettings', {});
+    // Миграция: до версии 1.24 тип груза по умолчанию был "генеральный груз".
+    // Раньше saveSettings() при любом сохранении (даже просто контактного
+    // лица) записывала в хранилище браузера ВСЕ поля настроек целиком, а не
+    // только реально изменённые логистом, - поэтому это старое значение
+    // "запоминалось" насовсем, и новый дефолт "ТНП" (введён в 1.24) для тех,
+    // кто уже сохранял контакты раньше, не применялся: в хранилище лежало
+    // устаревшее значение, а getSettings() всегда предпочитает сохранённое
+    // значение дефолту из кода. Раз логист никогда явно не выбирал тип груза
+    // как настройку (в форме это поле каждый раз заполняется заново) - считаем
+    // это старое значение неактуальным и используем актуальный дефолт.
+    if (saved.cargoType === 'генеральный груз') delete saved.cargoType;
+    return Object.assign({}, DEFAULTS_SCHEMA, saved);
+  }
+  function saveSettings(patch) {
+    // Мёржим patch поверх того, что УЖЕ реально лежит в GM-хранилище, а не
+    // поверх getSettings() (где сверху уже подмешаны дефолты из DEFAULTS_SCHEMA
+    // на момент вызова) - иначе любое сохранение "замораживает" в хранилище
+    // текущие дефолты навсегда, и они перестают подхватывать изменения из
+    // новых версий скрипта (именно так и появился баг с "генеральный груз"
+    // вместо "ТНП" выше - saveSettings() для контактного лица заодно записала
+    // и тогдашний дефолт типа груза как будто это выбор логиста).
+    const savedRaw = GM_getValue('orderBotSettings', {});
+    const merged = Object.assign({}, savedRaw, patch);
+    GM_setValue('orderBotSettings', merged);
+    return Object.assign({}, DEFAULTS_SCHEMA, merged);
+  }
+
+  /* =========================================================================
+   *  1. ПАРСЕР СООБЩЕНИЯ (регулярки/эвристики, см. пояснения в README)
+   * ========================================================================= */
+  function NB() { return '(?<![а-яёА-ЯЁa-zA-Z0-9])'; }
+  function NA() { return '(?![а-яёА-ЯЁa-zA-Z0-9])'; }
+
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function fmtDate(d) { return `${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`; }
+
+  function parseRuNumber(s) {
+    let clean = s.trim();
+    clean = clean.replace(/(\d)[ .](\d{3})(?=\D|$)/g, '$1$2');
+    clean = clean.replace(/(\d)[ .](\d{3})(?=\D|$)/g, '$1$2');
+    clean = clean.replace(',', '.');
+    return parseFloat(clean);
+  }
+
+  function mask(text, re) { return text.replace(re, (m) => ' '.repeat(m.length)); }
+
+  // Ставка процента, на которую пересчитывается цена "без НДС" (см.
+  // applyNoVatMarkup ниже) - по указанию Ramil, а не фактическая ставка налога.
+  const NO_VAT_MARKUP_RATE = 0.22;
+
+  // Дispetcher часто называет цену "без НДС" - в наших заказах на сайте всегда
+  // нужна ставка "с НДС", поэтому такую цену пересчитываем (+22%) и дальше
+  // считаем её уже "с НДС". "Нал" (наличный расчёт) - другое дело: там сумма
+  // остаётся как есть, а НДС - "нет" (это отдельно уже задано в result.vat
+  // вызывающим кодом до вызова этой функции - см. extractPrice). Если vat не
+  // false (true или null/не указано в сообщении) или это "нал" - ничего не
+  // меняем, просто возвращаем то, что было.
+  function applyNoVatMarkup(amount, vat, isCash) {
+    if (amount === null || amount === undefined || vat !== false || isCash) {
+      return { amount, vat };
+    }
+    return { amount: Math.round(amount * (1 + NO_VAT_MARKUP_RATE)), vat: true };
+  }
+
+  // Доля, которую логист платит привлечённому перевозчику от цены клиента -
+  // по указанию Ramil: -10% от цены клиента, округлённые В МЕНЬШУЮ СТОРОНУ до
+  // 1000 руб (например, 65000 -> 58500 -> округляем вниз до 58000). Если цена
+  // клиента ещё неизвестна (не распознана/не указана) - возвращаем запасное
+  // значение (fallback, обычно settings.invitedFleetPrice), логист в любом
+  // случае может поправить поле "Ставка перевозчика" вручную перед заполнением
+  // сайта.
+  const INVITED_FLEET_DISCOUNT_RATE = 0.10;
+  const INVITED_FLEET_ROUND_STEP = 1000;
+  function computeInvitedFleetPrice(clientPrice, fallback) {
+    if (typeof clientPrice !== 'number' || !isFinite(clientPrice) || clientPrice <= 0) {
+      return fallback;
+    }
+    return Math.floor((clientPrice * (1 - INVITED_FLEET_DISCOUNT_RATE)) / INVITED_FLEET_ROUND_STEP) * INVITED_FLEET_ROUND_STEP;
+  }
+
+  // По просьбе Ramil: если распознанный город погрузки/выгрузки - ровно
+  // "Москва" или "Санкт-Петербург" (БЕЗ более точного адреса в самом
+  // сообщении диспетчера - тогда geocoder ставит точку в центр города, а не
+  // туда, где реально грузятся/выгружаются), подставляем известный полный
+  // адрес вместо голого названия города. Если в сообщении уже был указан
+  // более точный адрес (например "Москва, Кутузовский 5") - он не совпадёт
+  // с ключом словаря ниже и останется как есть, без подмены.
+  const DEFAULT_CITY_ADDRESS = {
+    'москва': 'Москва, Магнитогорская улица, 17',
+    'санкт-петербург': 'Санкт-Петербург, Балканская улица, 17',
+  };
+  function applyDefaultCityAddress(cityText) {
+    if (!cityText) return cityText;
+    // "г. Москва" / "г Москва" / "Москва." - тоже считаем "голым" городом.
+    const key = cityText.trim().toLowerCase().replace(/^г\.?\s+/, '').replace(/\.$/, '');
+    return DEFAULT_CITY_ADDRESS[key] || cityText;
+  }
+
+  // По просьбе Ramil: с тех пор, как ИИ-разбор стал возвращать ПОЛНЫЙ адрес
+  // (область, населённый пункт, улица, дом), а не просто город (см. правило
+  // про точность адреса в buildAiPrompt), список "Несколько заказов в
+  // сообщении" стал нечитаемым - один и тот же длинный адрес погрузки
+  // повторяется у КАЖДОГО пункта списка. Эта функция вытаскивает из полного
+  // адреса только "человеческое" название населённого пункта - ТОЛЬКО для
+  // короткой подписи в этом списке (см. renderAiOrderOptions), на сами поля
+  // формы (которые заполняются полным адресом) она не влияет.
+  function shortLocationLabel(address) {
+    if (!address) return address;
+    // Уточнение вроде "(трасса М5)" к названию места не относится - убираем.
+    const cleaned = address.replace(/\([^)]*\)/g, '').trim();
+    const parts = cleaned.split(',').map(s => s.trim()).filter(Boolean);
+    if (!parts.length) return address;
+    // Явный признак населённого пункта ("г.", "р.п.", "с.", "дер." и т.п.) -
+    // самый надёжный сигнал, отдаём приоритет ему, даже если он не первый
+    // сегмент (обычно после региона, см. "Ульяновская обл., р.п. Новоспасское").
+    const SETTLEMENT_MARKER = /^(г\.?|город|рп\.?|р\.?\s*п\.?|пос\.?|посёлок|поселок|дер\.?|деревня|село|с\.?|ст-?ца\.?|станица|аул)\s+(.+)$/i;
+    // Регион/район - никогда не название населённого пункта, пропускаем.
+    const isRegionOrDistrict = (s) => /(обл\.?|область|край|р-?н\.?|район)\s*$/i.test(s) || /^респ(\.|ублика)?\b/i.test(s);
+    // Улица/дом/микрорайон/ЖК - тоже не то, что нужно для короткой подписи.
+    const isStreetOrHouse = (s) => /^(ул\.?|улица|пр-?кт\.?|проспект|пер\.?|переулок|б-?р\.?|бульвар|ш\.?|шоссе|мкр\.?|микрорайон|наб\.?|набережная|пл\.?|площадь|тракт|трасса|д\.?\s*\d|дом\s*\d|\d)/i.test(s);
+    const isComplex = (s) => /^(ЖК|БЦ|ТЦ|ТРЦ|промзона)\b/i.test(s);
+    for (const part of parts) {
+      const m = part.match(SETTLEMENT_MARKER);
+      if (m) return m[2].trim();
+      if (isRegionOrDistrict(part) || isStreetOrHouse(part) || isComplex(part)) continue;
+      return part;
+    }
+    return parts[0];
+  }
+
+  const MONTH_PATTERNS = [
+    [1, /^янв/i], [2, /^фев/i], [3, /^мар/i], [4, /^апр/i], [5, /^ма[йя]/i],
+    [6, /^июн/i], [7, /^июл/i], [8, /^авг/i], [9, /^сен/i], [10, /^окт/i],
+    [11, /^ноя/i], [12, /^дек/i],
+  ];
+  function monthNumFromWord(w) {
+    for (const [num, re] of MONTH_PATTERNS) if (re.test(w)) return num;
+    return null;
+  }
+
+  // Дни недели ("на пн", "во вторник") - индексы совпадают с Date#getDay()
+  // (воскресенье = 0, понедельник = 1, ...).
+  const WEEKDAY_PATTERNS = [
+    [1, /^понедельник$|^пн\.?$/i],
+    [2, /^вторник$|^вт\.?$/i],
+    [3, /^сред[ауы]$|^ср\.?$/i],
+    [4, /^четверг$|^чт\.?$/i],
+    [5, /^пятниц[ауы]$|^пт\.?$/i],
+    [6, /^суббот[ауы]$|^сб\.?$/i],
+    [0, /^воскресень[ея]$|^вс\.?$/i],
+  ];
+  function weekdayNumFromWord(w) {
+    const word = w.trim();
+    for (const [num, re] of WEEKDAY_PATTERNS) if (re.test(word)) return num;
+    return null;
+  }
+
+  // Список слов дней недели одной строкой для регулярок - используется и в
+  // обычном (regex) разборе (extractDates ниже), и в код-level подстраховке
+  // от ошибок ИИ в расчёте даты по дню недели (см. detectWeekdayOnlyDates и
+  // applyAiOrder) - чтобы не дублировать список в двух местах.
+  const WEEKDAY_ALT = 'понедельник|вторник|сред[ауы]|четверг|пятниц[ауы]|суббот[ауы]|воскресень[ея]|пн|вт|ср|чт|пт|сб|вс';
+
+  // Надёжно (без участия ИИ) вычисляет дату ПОГРУЗКИ по дню(-ям) недели, если
+  // они упомянуты в тексте БЕЗ чисел - "на чт" (один день) или "на чт-пт"
+  // (два дня подряд через дефис). ВАЖНО про диапазон: "чт-пт" - это НЕ "погрузка
+  // в четверг, выгрузка в пятницу", а ТО ЖЕ САМОЕ, что обычное "или" между
+  // двумя числовыми датами ("25.09 или 28.09") - диспетчер называет ОКНО, любой
+  // из двух дней подходит для погрузки (Ramil: "чт-пт не значит что погрузка в
+  // четверг, а выгрузка в пятницу, это значит что погрузиться можно либо в
+  // четверг, либо в пятницу"). Поэтому возвращаем только ОДНУ дату - ближайший
+  // из двух названных дней (по умолчанию более раннюю, как и просил Ramil) - а
+  // дату выгрузки эта функция вообще не трогает: она, как обычно, уточнится
+  // отдельно по расстоянию маршрута (см. computeDateTo/recomputeDateTo), если
+  // ИИ не назвал её отдельно явно. Та же логика (и то же уточнение про "или",
+  // а не диапазон), что и в extractDates() ниже, но применяется к произвольному
+  // (немаскированному) тексту и не требует полного разбора сообщения - нужна
+  // как код-level подстраховка в applyAiOrder(): YandexGPT минимум один раз
+  // ошибся в расчёте даты по дню недели, даже получив явную инструкцию и
+  // разобранный пример в промпте (buildAiPrompt, "Пример 4") - календарная
+  // арифметика ("какой датой будет ближайший четверг") ненадёжна у LLM даже с
+  // подсказкой, поэтому для ЭТОГО конкретного случая результату ИИ не
+  // доверяем и подменяем его этим детерминированным расчётом. Возвращает
+  // null, если в тексте не нашлось ни диапазона, ни одиночного дня недели.
+  function detectWeekdayOnlyDates(text) {
+    const now = new Date();
+    const rangeRe = new RegExp(
+      `${NB()}(?:на\\s+)?(${WEEKDAY_ALT})\\s*-\\s*(${WEEKDAY_ALT})\\.?${NA()}`,
+      'gi'
+    );
+    const mRange = rangeRe.exec(text);
+    if (mRange) {
+      const day1 = weekdayNumFromWord(mRange[1]);
+      const day2 = weekdayNumFromWord(mRange[2]);
+      if (day1 !== null && day2 !== null) {
+        const diff1 = (day1 - now.getDay() + 7) % 7;
+        const d1 = new Date(now);
+        d1.setDate(d1.getDate() + diff1);
+        const diff2 = (day2 - now.getDay() + 7) % 7;
+        const d2 = new Date(now);
+        d2.setDate(d2.getDate() + diff2);
+        const earlier = d1 <= d2 ? d1 : d2;
+        const later = d1 <= d2 ? d2 : d1;
+        // dateWindowTo - вторая (более поздняя) дата окна, чтобы код-level
+        // подстраховка могла поправить не только "date", но и окно для
+        // настоящего интервала на сайте (см. applyAiOrder/loadingDateWindowTo).
+        return { date: fmtDate(earlier), dateWindowTo: fmtDate(later) };
+      }
+    }
+    const singleRe = new RegExp(
+      `${NB()}(?:на|во|в)\\s+(${WEEKDAY_ALT})\\.?${NA()}`,
+      'gi'
+    );
+    const mSingle = singleRe.exec(text);
+    if (mSingle) {
+      const dayNum = weekdayNumFromWord(mSingle[1]);
+      if (dayNum !== null) {
+        const diff = (dayNum - now.getDay() + 7) % 7;
+        const d = new Date(now);
+        d.setDate(d.getDate() + diff);
+        return { date: fmtDate(d) };
+      }
+    }
+    return null;
+  }
+
+  function extractDates(text) {
+    const dates = [];
+    const now = new Date();
+    let working = text;
+
+    if (/сегодня/i.test(working)) dates.push({ raw: 'сегодня', date: fmtDate(now) });
+    if (/завтра/i.test(working)) {
+      const d = new Date(now);
+      d.setDate(d.getDate() + 1);
+      dates.push({ raw: 'завтра', date: fmtDate(d) });
+    }
+    working = mask(working, /сегодня|завтра/gi);
+
+    let m;
+
+    // "02-03.10" / "02-03.10.26" - ДВА дня подряд через дефис с ОДНИМ месяцем
+    // на двоих (первое число - БЕЗ своей точки/месяца, в отличие от полного
+    // диапазона двух дат "25.09-28.09", где у КАЖДОГО числа есть своя точка -
+    // такой случай сюда не попадает, см. (?<![./]) ниже, и разбирается как
+    // раньше, обычным dateRe). Ramil, на примере сообщения "02-03.10 Пермь -
+    // Новосибирск 06.10 ...": "02-03.10 это интервал дат погрузки" - то есть
+    // это ОКНО для погрузки (годится любой из двух дней), а НЕ пара дат
+    // погрузка/выгрузка - та же логика, что и у диапазона дней недели ("чт-пт",
+    // см. weekdayRangeRe ниже) и обычного "или" между датами. Настоящая дата
+    // выгрузки, если она есть, называется в сообщении ОТДЕЛЬНО (как "06.10" в
+    // примере выше) - её подхватит обычный dateRe ниже как третью дату (см.
+    // hasExplicitDateTo/computeDateTo). Обрабатываем и маскируем ДО dateRe -
+    // иначе он по отдельности подхватит только "03.10" (у "02" нет своей
+    // точки) как ОДНУ дату и спутает её с датой погрузки.
+    const dayRangeWithMonthRe = new RegExp(
+      `(?<![./])${NB()}(\\d{1,2})\\s*-\\s*(\\d{1,2})\\.(\\d{1,2})(?:\\.(\\d{2,4}))?${NA()}`,
+      'gi'
+    );
+    let hasDayRangeWithMonthMatch = false;
+    while ((m = dayRangeWithMonthRe.exec(working))) {
+      const day1 = parseInt(m[1], 10);
+      const day2 = parseInt(m[2], 10);
+      const month = parseInt(m[3], 10);
+      if (day1 < 1 || day1 > 31 || day2 < 1 || day2 > 31 || month < 1 || month > 12) continue;
+      let year = m[4] ? parseInt(m[4], 10) : now.getFullYear();
+      if (year < 100) year += 2000;
+      const d1 = new Date(year, month - 1, day1);
+      const d2 = new Date(year, month - 1, day2);
+      const earlierDay = d1 <= d2 ? day1 : day2;
+      const laterDay = d1 <= d2 ? day2 : day1;
+      dates.push({ raw: m[0], date: `${pad2(earlierDay)}.${pad2(month)}.${year}`, index: m.index, len: m[0].length });
+      dates.push({ raw: m[0], date: `${pad2(laterDay)}.${pad2(month)}.${year}`, index: m.index, len: m[0].length });
+      hasDayRangeWithMonthMatch = true;
+    }
+    working = mask(working, dayRangeWithMonthRe);
+
+    // Разделитель дд/мм - точка или слэш ("24.09" и "24/09" встречаются одинаково часто).
+    const dateRe = /\b(\d{1,2})[.\/](\d{1,2})(?:[.\/](\d{2,4}))?(?![а-яёa-z\d])(?!\s*[а-яё]\d)/gi;
+    while ((m = dateRe.exec(working))) {
+      const day = parseInt(m[1], 10);
+      const month = parseInt(m[2], 10);
+      if (day < 1 || day > 31 || month < 1 || month > 12) continue;
+      let year = m[3] ? parseInt(m[3], 10) : now.getFullYear();
+      if (year < 100) year += 2000;
+      dates.push({ raw: m[0], date: `${pad2(day)}.${pad2(month)}.${year}`, index: m.index, len: m[0].length });
+    }
+
+    // "24 сент." / "26 сентября" - число + слово месяца (карточки с внешних бирж).
+    const monthWordRe = new RegExp(`${NB()}(\\d{1,2})\\s+([а-яё]{3,8})\\.?${NA()}`, 'gi');
+    while ((m = monthWordRe.exec(working))) {
+      const day = parseInt(m[1], 10);
+      const month = monthNumFromWord(m[2]);
+      if (!month || day < 1 || day > 31) continue;
+      dates.push({ raw: m[0], date: `${pad2(day)}.${pad2(month)}.${now.getFullYear()}`, index: m.index, len: m[0].length });
+    }
+
+    // "29-30 число" / "29 число" - день(-дни) месяца без явного месяца.
+    // Подразумеваемый месяц - текущий, если день ещё не прошёл, иначе
+    // следующий ("5 число", сказанное 24-го, значит "5 числа следующего
+    // месяца"). Второй день диапазона считаем от месяца/года первого.
+    const numberOfMonthRe = new RegExp(`${NB()}(\\d{1,2})(?:\\s*-\\s*(\\d{1,2}))?\\s*числ[оа]${NA()}`, 'gi');
+    while ((m = numberOfMonthRe.exec(working))) {
+      const day1 = parseInt(m[1], 10);
+      if (day1 < 1 || day1 > 31) continue;
+      let month1 = now.getMonth() + 1;
+      let year1 = now.getFullYear();
+      if (day1 < now.getDate()) {
+        month1 += 1;
+        if (month1 > 12) { month1 = 1; year1 += 1; }
+      }
+      dates.push({ raw: m[0], date: `${pad2(day1)}.${pad2(month1)}.${year1}`, index: m.index, len: m[0].length });
+      if (m[2]) {
+        const day2 = parseInt(m[2], 10);
+        if (day2 >= 1 && day2 <= 31) {
+          let month2 = month1, year2 = year1;
+          if (day2 < day1) {
+            month2 += 1;
+            if (month2 > 12) { month2 = 1; year2 += 1; }
+          }
+          dates.push({ raw: m[0], date: `${pad2(day2)}.${pad2(month2)}.${year2}`, index: m.index, len: m[0].length });
+        }
+      }
+    }
+
+    // "чт-пт" / "чт - пт" / "четверг-пятница" - ДВА дня недели подряд через
+    // дефис, без явных чисел. Ramil уточнил: это НЕ "погрузка в четверг,
+    // выгрузка в пятницу" (в отличие от числового "29-30 число" ниже) - это
+    // ОКНО для погрузки: подходит либо один день, либо другой ("погрузиться
+    // можно либо в четверг, либо в пятницу"), ровно как обычное "или" между
+    // двумя числовыми датами ("25.09 или 28.09" - см. alternative ниже). Обе
+    // даты всё равно кладём в dates[] (сортировка - от ближайшей к сегодня к
+    // более далёкой, а не в порядке "первый/второй названный день") и сразу
+    // помечаем сообщение как alternative - pickDate()/сайт по умолчанию
+    // возьмут более раннюю (см. просьбу Ramil "лучше ставить более раннюю
+    // дату"), а обе даты останутся видны в списке "альтернативные даты" для
+    // ручного выбора. Дата выгрузки эту пару вообще не трогает - она, как и
+    // при одной названной дате, уточнится отдельно по расстоянию маршрута.
+    // Обрабатываем ДО одиночного распознавания дня недели ниже и сразу
+    // маскируем совпадение - иначе второй день диапазона остаётся в тексте
+    // немаскированным и ломает разбор маршрута (двухбуквенное "пт" формально
+    // похоже на ещё один "город" для extractRoute() - реальный баг на
+    // сообщении "Нижний Тагил - Хабаровск на чт-пт 490 000").
+    const weekdayRangeRe = new RegExp(
+      `${NB()}(?:на\\s+)?(${WEEKDAY_ALT})\\s*-\\s*(${WEEKDAY_ALT})\\.?${NA()}`,
+      'gi'
+    );
+    let hasWeekdayRangeMatch = false;
+    while ((m = weekdayRangeRe.exec(working))) {
+      const day1 = weekdayNumFromWord(m[1]);
+      const day2 = weekdayNumFromWord(m[2]);
+      if (day1 === null || day2 === null) continue;
+      const diff1 = (day1 - now.getDay() + 7) % 7;
+      const d1 = new Date(now);
+      d1.setDate(d1.getDate() + diff1);
+      const diff2 = (day2 - now.getDay() + 7) % 7;
+      const d2 = new Date(now);
+      d2.setDate(d2.getDate() + diff2);
+      const [earlier, later] = d1 <= d2 ? [d1, d2] : [d2, d1];
+      dates.push({ raw: m[0], date: fmtDate(earlier), index: m.index, len: m[0].length });
+      dates.push({ raw: m[0], date: fmtDate(later), index: m.index, len: m[0].length });
+      hasWeekdayRangeMatch = true;
+    }
+    working = mask(working, weekdayRangeRe);
+
+    // "на пн" / "во вторник" - день недели вместо числа. Берём ближайший такой
+    // день считая от сегодня (сегодня включительно, если сегодня уже он).
+    const weekdayRe = new RegExp(
+      `${NB()}(?:на|во|в)\\s+(понедельник|вторник|сред[ауы]|четверг|пятниц[ауы]|суббот[ауы]|воскресень[ея]|пн|вт|ср|чт|пт|сб|вс)\\.?${NA()}`,
+      'gi'
+    );
+    while ((m = weekdayRe.exec(working))) {
+      const dayNum = weekdayNumFromWord(m[1]);
+      if (dayNum === null) continue;
+      const diff = (dayNum - now.getDay() + 7) % 7;
+      const d = new Date(now);
+      d.setDate(d.getDate() + diff);
+      dates.push({ raw: m[0], date: fmtDate(d), index: m.index, len: m[0].length });
+    }
+
+    dates.sort((a, b) => (a.index ?? -1) - (b.index ?? -1));
+
+    // "или"/"либо" между первыми двумя датами = АЛЬТЕРНАТИВНЫЕ варианты одной
+    // даты погрузки ("25.09 или 28.09"), а не диапазон погрузка/выгрузка -
+    // такую вторую дату нельзя подставлять как дату выгрузки (см. computeDateTo).
+    // Диапазон дней недели ("чт-пт", см. weekdayRangeRe выше) и числовое окно
+    // погрузки ("02-03.10", см. dayRangeWithMonthRe выше) - ТО ЖЕ САМОЕ "или",
+    // просто без самого слова "или" в тексте - помечаем явно.
+    let alternative = hasWeekdayRangeMatch || hasDayRangeWithMonthMatch;
+    if (dates.length >= 2 && dates[0].index !== undefined && dates[1].index !== undefined) {
+      const between = working.slice(dates[0].index + dates[0].len, dates[1].index);
+      if (/или|либо/i.test(between)) alternative = true;
+    }
+
+    // Союз "и" между первыми двумя датами ("на сб и на вс") - это ДВА
+    // ОТДЕЛЬНЫХ рейса/заказа на разные даты, а не диапазон погрузка/выгрузка
+    // одного заказа. \b рядом с кириллицей не работает - используем NB()/NA().
+    let multiOrder = false;
+    if (!alternative && dates.length >= 2 && dates[0].index !== undefined && dates[1].index !== undefined) {
+      const between = working.slice(dates[0].index + dates[0].len, dates[1].index);
+      if (new RegExp(`${NB()}и${NA()}`, 'i').test(between)) multiOrder = true;
+    }
+
+    let masked = working;
+    for (const d of dates) {
+      if (d.index !== undefined) {
+        masked = masked.slice(0, d.index) + ' '.repeat(d.len) + masked.slice(d.index + d.len);
+      }
+    }
+    return { dates, alternative, multiOrder, textAfterMask: masked };
+  }
+
+  function extractTime(text) {
+    const result = { exact: null, from: null, to: null, before: null, after: null, allDay: false };
+    let working = text;
+    if (/круглосут/i.test(working)) { result.allDay = true; working = mask(working, /круглосут(?:очно|ка)?/gi); }
+
+    const nb = NB();
+    let m;
+    if ((m = working.match(new RegExp(`${nb}с[ \\t]*(\\d{1,2}:\\d{2})[ \\t]*(?:-|до)[ \\t]*(\\d{1,2}:\\d{2})`, 'i')))) {
+      result.from = m[1]; result.to = m[2];
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}к[ \\t]*(\\d{1,2}:\\d{2})`, 'i')))) {
+      result.before = m[1];
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}после[ \\t]*(\\d{1,2}:\\d{2})`, 'i')))) {
+      result.after = m[1];
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}в[ \\t]*(\\d{1,2}:\\d{2})`, 'i')))) {
+      result.exact = m[1];
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(/(\d{1,2}:\d{2})/))) {
+      result.exact = m[1];
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    }
+    return { time: result, textAfterMask: working };
+  }
+
+  function extractPrice(text) {
+    const result = { amount: null, vat: null, negotiable: false, raw: null };
+    let working = text;
+
+    // "без торга" - явно ФИКСИРОВАННАЯ цена, а не признак договорной -
+    // убираем фразу из текста, но НЕ ставим negotiable.
+    const noNegotiationRe = /без\s*торг[а-яё]*/i;
+    let noNegM = working.match(noNegotiationRe);
+    if (noNegM) working = working.replace(noNegM[0], ' '.repeat(noNegM[0].length));
+
+    // "торг"/"торги"/"ставку обсуждаем"/"цена договорная" - цена договорная
+    // (на сайте нужно выставить тип цены "Предложения", а не "Фикс"). Убираем
+    // найденную фразу из текста, чтобы слово "торги" не мусорило маршрут.
+    const negotiableRe = new RegExp(`${NB()}(ставк[а-яё]*\\s+обсуд[а-яё]*|цена\\s+договорн[а-яё]*|договорн[а-яё]*|обсуждаем|торг[а-яё]*)${NA()}`, 'i');
+    let negM = working.match(negotiableRe);
+    if (negM) {
+      result.negotiable = true;
+      working = working.replace(negM[0], ' '.repeat(negM[0].length));
+    }
+    // isCash отличает "нал" от обычного "без НДС" - обе фразы дают vat=false,
+    // но цену пересчитываем (+22%, см. applyNoVatMarkup выше) ТОЛЬКО для явного
+    // "без НДС", а не для наличного расчёта.
+    let isCash = false;
+    if (/без\s*ндс/i.test(working)) result.vat = false;
+    else if (/с\s*ндс/i.test(working)) result.vat = true;
+    // "нал" (наличный расчёт) на практике всегда означает "без НДС", но, в
+    // отличие от обычного "без НДС", цену за него НЕ пересчитываем.
+    else if (new RegExp(`${NB()}нал${NA()}`, 'i').test(working)) { result.vat = false; isCash = true; }
+    // Карточки с внешних бирж часто обрезают "без НДС" до одного "без" сразу
+    // после суммы/значка рубля ("195 000 ₽  без").
+    else if (new RegExp(`(?:₽|руб\\.?)\\s*без${NA()}`, 'i').test(working)) result.vat = false;
+
+    const nb = NB(), na = NA();
+    let m;
+    if ((m = working.match(new RegExp(`${nb}(\\d{1,3}(?:[ .]\\d{3})+(?:[.,]\\d{1,2})?)${na}`)))) {
+      result.raw = m[1]; result.amount = parseRuNumber(m[1]);
+      working = working.replace(m[1], ' '.repeat(m[1].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d+(?:[.,]\\d+)?)\\s*млн${na}`, 'i')))) {
+      result.raw = m[0]; result.amount = parseRuNumber(m[1]) * 1_000_000;
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d+(?:[.,]\\d+)?)к${na}`, 'i')))) {
+      result.raw = m[0]; result.amount = parseRuNumber(m[1]) * 1000;
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d+(?:[.,]\\d+)?)\\s*(?:тр|т\\.?р\\.?)${na}`, 'i')))) {
+      result.raw = m[0]; result.amount = parseRuNumber(m[1]) * 1000;
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d+(?:[.,]\\d+)?)\\s*тыс\\.?[а-яё]*${na}`, 'i')))) {
+      // "480тыс" / "480 тыс." / "480 тысяч"
+      result.raw = m[0]; result.amount = parseRuNumber(m[1]) * 1000;
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d{2,6})${na}(?=[^\\n]{0,12}?(?:с\\s*ндс|без\\s*ндс))`, 'i')))) {
+      result.raw = m[1]; result.amount = parseRuNumber(m[1]);
+      working = working.replace(m[1], ' '.repeat(m[1].length));
+    } else if ((m = working.match(new RegExp(`${nb}(\\d{2,6})${na}(?!\\s*км)`, 'i')))) {
+      // Голое число без "тр"/"к"/"млн"/НДС рядом - тоже цена в тысячах ("630" = 630 000).
+      // К этому моменту прицеп/объём/вес/кол-во ТС уже вычищены выше по тексту,
+      // а упоминания расстояния ("1841 км") явно исключены.
+      result.raw = m[1]; result.amount = parseRuNumber(m[1]);
+      working = working.replace(m[1], ' '.repeat(m[1].length));
+    }
+
+    if (result.amount !== null && result.amount > 0 && result.amount < 1000) result.amount *= 1000;
+
+    // Наценка за "без НДС" (не за "нал") - см. applyNoVatMarkup. Применяем
+    // ПОСЛЕ домножения короткой суммы на 1000 выше, чтобы наценка считалась от
+    // настоящей суммы в рублях, а не от сокращённой записи.
+    {
+      const adjusted = applyNoVatMarkup(result.amount, result.vat, isCash);
+      result.amount = adjusted.amount;
+      result.vat = adjusted.vat;
+    }
+
+    return { price: result, textAfterMask: working };
+  }
+
+  // По просьбе Ramil: комментарий на сайте заполняется исходным текстом
+  // сообщения ЦЕЛИКОМ, для истории (см. fillOrderOnSite, раздел "Другое") -
+  // но этот комментарий виден уже САМОМУ ПЕРЕВОЗЧИКУ/водителю на карточке
+  // заказа, а клиентская цена туда попадать не должна (у перевозчика своя,
+  // отдельная ставка - см. computeInvitedFleetPrice). Вырезаем из текста
+  // числа, которые явно ВЫГЛЯДЯТ как цена - те же самые шаблоны с явным
+  // денежным маркером, что и в extractPrice() выше (сгруппировано по тысячам,
+  // либо рядом с "тр"/"к"/"млн"/"тыс"/"НДС").
+  //
+  // v1.27.24 намеренно НЕ трогал "голые" числа без вообще никакого маркера
+  // рядом ("03/10 Ревда-ДМД 100") - опасались случайно вырезать вес/км/кол-во
+  // ТС. Но диспетчеры реально пишут цену и без маркера, поэтому Ramil
+  // попросил ловить и такой случай - это привело к утечке цены в комментарий.
+  // Делаем это ТЕМ ЖЕ безопасным способом, каким сам extractPrice() внутри
+  // parseMessage() применяет свой "запасной" разбор голого числа: сначала на
+  // РАБОЧЕЙ КОПИИ текста маскируем (заменяем на пробелы ТОЙ ЖЕ длины, не
+  // сдвигая остальной текст) дату/время/тип прицепа+объём/вес/кол-во ТС - те
+  // самые поля, из-за которых голое число вообще может быть перепутано с
+  // ценой - и только после этого ищем, что осталось похоже на голое число.
+  // Позиции найденного в рабочей копии 1-в-1 совпадают с позициями в
+  // ИСХОДНОМ тексте (маскирование не меняет длину), поэтому вырезаем именно
+  // эти диапазоны из настоящего rawText, а не из замаскированной копии.
+  function redactPriceFromComment(rawText) {
+    if (!rawText) return rawText;
+    const nb = NB(), na = NA();
+
+    const markedRe = new RegExp(
+      `${nb}\\d{1,3}(?:[ .]\\d{3})+(?:[.,]\\d{1,2})?${na}` +
+      `|${nb}\\d+(?:[.,]\\d+)?\\s*млн${na}` +
+      `|${nb}\\d+(?:[.,]\\d+)?к${na}` +
+      `|${nb}\\d+(?:[.,]\\d+)?\\s*(?:тр|т\\.?р\\.?)${na}` +
+      `|${nb}\\d+(?:[.,]\\d+)?\\s*тыс\\.?[а-яё]*${na}` +
+      `|${nb}\\d{2,6}${na}(?=[^\\n]{0,12}?(?:с\\s*ндс|без\\s*ндс))`,
+      'gi'
+    );
+    const spans = [];
+    let m;
+    while ((m = markedRe.exec(rawText))) {
+      spans.push({ index: m.index, len: m[0].length });
+    }
+
+    // Рабочая копия только для поиска позиций - в итоговый текст не попадает.
+    let masked = rawText;
+    masked = extractDates(masked).textAfterMask;
+    masked = extractTime(masked).textAfterMask;
+    masked = extractTrailer(masked).textAfterMask;
+    masked = extractWeight(masked).textAfterMask;
+    masked = extractVehicleCount(masked).textAfterMask;
+
+    const bareRe = new RegExp(`${nb}(\\d{2,6})${na}(?!\\s*км)`, 'gi');
+    while ((m = bareRe.exec(masked))) {
+      const start = m.index, end = m.index + m[0].length;
+      const overlaps = spans.some(s => start < s.index + s.len && end > s.index);
+      if (!overlaps) spans.push({ index: start, len: end - start });
+    }
+
+    if (!spans.length) {
+      return rawText.split('\n').map(line => line.replace(/[ \t]{2,}/g, ' ').trim()).join('\n');
+    }
+
+    spans.sort((a, b) => a.index - b.index);
+    let out = '';
+    let last = 0;
+    for (const s of spans) {
+      out += rawText.slice(last, s.index);
+      last = s.index + s.len;
+    }
+    out += rawText.slice(last);
+
+    return out
+      .split('\n')
+      .map(line => line.replace(/[ \t]{2,}/g, ' ').trim())
+      .join('\n');
+  }
+
+  // Короткие формы, которыми называют тип прицепа, но которых нет среди
+  // вариантов на сайте (там - полное название) - разворачиваем в полное.
+  // "Термос" - то же самое, что и изотермический прицеп (изотерм), просто
+  // другое разговорное название у диспетчеров - по указанию Ramil.
+  const TRAILER_ALIASES = { 'Реф': 'Рефрижератор', 'Изотерм': 'Изотермический', 'Термос': 'Изотермический' };
+  function extractTrailer(text) {
+    // types - ВСЕ типы прицепа, встреченные в сообщении (например, "реф, тент,
+    // изотерм" - логист перечисляет, какой прицеп подойдёт). type - первый из
+    // них, для обратной совместимости с кодом, которому нужен только один.
+    // Раньше типы вырезались только ПЕРВЫМ найденным совпадением (без 'g') -
+    // остальные оставались в тексте и ломали разбор маршрута (тот же паттерн
+    // бага, что был с "коники"/"торги" - незамаскированное слово мешает
+    // дальнейшему разбору), поэтому здесь регулярка с флагом 'g' и вырезаются
+    // ВСЕ совпадения за один проход.
+    const result = { type: null, types: [], m3: null };
+    let working = text;
+    const knownTypes = ['Тент', 'Рефрижератор', 'Реф', 'Изотерм', 'Борт', 'Трал', 'Контейнеровоз', 'Бензовоз', 'Фургон', 'Самосвал', 'Термос'];
+    // "\s*,?" в конце - типы прицепа часто перечисляют через запятую ("реф,
+    // тент, изотерм"), и запятая-разделитель, если её не съесть вместе со
+    // словом, остаётся в тексте отдельным "словом" и ломает разбор маршрута
+    // (нарушает расчёт "ровно 2 токена" для формата без дефиса, см. ниже).
+    const typeRe = new RegExp(`${NB()}(${knownTypes.join('|')})${NA()}\\s*,?`, 'gi');
+    working = working.replace(typeRe, (m0, m1) => {
+      const cap = m1[0].toUpperCase() + m1.slice(1).toLowerCase();
+      const full = TRAILER_ALIASES[cap] || cap;
+      if (!result.types.includes(full)) result.types.push(full);
+      return ' '.repeat(m0.length);
+    });
+    result.type = result.types[0] || null;
+    // "мз" - разговорное сокращение/опечатка диспетчеров вместо "м3" (то же
+    // самое - объём кузова в кубометрах), встречается не реже полного "м3".
+    const m3Re = new RegExp(`${NB()}(\\d+(?:[.,]\\d+)?)\\s*(?:мз|м(?:3|³))`, 'i');
+    let m3m = working.match(m3Re);
+    if (m3m) {
+      result.m3 = parseFloat(m3m[1].replace(',', '.'));
+      working = working.replace(m3m[0], ' '.repeat(m3m[0].length));
+    }
+    return { trailer: result, textAfterMask: working };
+  }
+
+  // Объём кузова ("110мз"/"110 м3"/"110м³"/"110 куб.м") ВИЗУАЛЬНО похож на вес
+  // ("число + буквы"), и YandexGPT иногда путает его с весом груза (полем
+  // "weight" в JSON-ответе) - несмотря на явное пояснение в buildAiPrompt. Эта
+  // функция - код-level подстраховка (тот же приём, что и для термоса/даты
+  // ИИ): применяется в applyAiOrder, чтобы поймать и сбросить такую ошибку,
+  // даже если промпт не помог. Возвращает список ВСЕХ чисел объёма, упомянутых
+  // в исходном сообщении (сообщение может содержать несколько заказов).
+  function extractVolumeM3Mentions(text) {
+    const re = /(\d+(?:[.,]\d+)?)\s*(?:мз|м(?:3|³)|куб\.?\s*м)/gi;
+    const nums = [];
+    let vm;
+    while ((vm = re.exec(text))) {
+      const n = parseFloat(vm[1].replace(',', '.'));
+      if (!isNaN(n)) nums.push(n);
+    }
+    return nums;
+  }
+
+  function extractWeight(text) {
+    let working = text;
+    // "Емкость машины: 40" / "Грузоподъёмность: 20" - формат карточек с внешних
+    // бирж, где вес указан отдельной строкой без "т" рядом.
+    const capacityRe = new RegExp(`${NB()}(?:ёмкост[ьи]|емкост[ьи]|грузоподъ[её]мность)\\s*(?:машины)?\\s*:?\\s*(\\d+(?:[.,]\\d+)?)${NA()}`, 'i');
+    let m = working.match(capacityRe);
+    if (m) {
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+      return { weight: parseFloat(m[1].replace(',', '.')), textAfterMask: working };
+    }
+    const re = new RegExp(`${NB()}(\\d+(?:[.,]\\d+)?)\\s*т(?:онн[аы]?)?(?![а-яёa-z])`, 'i');
+    m = working.match(re);
+    if (m) {
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+      return { weight: parseFloat(m[1].replace(',', '.')), textAfterMask: working };
+    }
+    return { weight: null, textAfterMask: working };
+  }
+
+  function extractVehicleCount(text) {
+    let working = text;
+    // "ТС" - основной вариант, но логисты так же часто пишут "2шт"/"2 шт."/"2ед." -
+    // тоже "количество ТС", просто другим словом.
+    const re = new RegExp(`${NB()}(\\d+)\\s*(?:ТС|шт\\.?|ед\\.?)${NA()}`, 'i');
+    const m = working.match(re);
+    if (m) {
+      working = working.replace(m[0], ' '.repeat(m[0].length));
+      return { vehicleCount: parseInt(m[1], 10), textAfterMask: working };
+    }
+    return { vehicleCount: 1, textAfterMask: working };
+  }
+
+  const DASH_RE = /[-–—]/;
+  const NOISE_WORDS = /^(на|в|с|до|к|и|или|очень|нужна|машина|обсудит|обсуждаем|догруз|срочно|ндс|нужен|нужны|нал|без|₽|коник[а-яё]*)$/i;
+
+  // Сокращения городов/хабов ("ДМД - Екат" = "Домодедово - Екатеринбург").
+  // Список можно свободно расширять - ключ в верхнем регистре без точки.
+  const CITY_ABBR = {
+    'ИЖ': 'Ижевск', 'УСС': 'Уссурийск', 'БЛАГА': 'Благовещенск', 'ДМД': 'Домодедово', 'ШРМ': 'Шереметьево', 'ШЕР': 'Шереметьево', 'ВНК': 'Внуково',
+    'МСК': 'Москва', 'СПБ': 'Санкт-Петербург', 'ПИТЕР': 'Санкт-Петербург',
+    'ЕКАТ': 'Екатеринбург', 'ЕКБ': 'Екатеринбург', 'ЕБУРГ': 'Екатеринбург',
+    'НН': 'Нижний Новгород', 'РНД': 'Ростов-на-Дону', 'НСК': 'Новосибирск',
+    'НОВОСИБ': 'Новосибирск', 'ЧЕЛ': 'Челябинск', 'ЧЕЛЯБ': 'Челябинск',
+    'КРД': 'Краснодар', 'ВОЛГОГР': 'Волгоград', 'МО': 'Москва',
+    'НАБ ЧЕЛНЫ': 'Набережные Челны', 'НАБЧЕЛНЫ': 'Набережные Челны',
+    'Н ЧЕЛНЫ': 'Набережные Челны', 'НЧЕЛНЫ': 'Набережные Челны', 'ЧЕЛНЫ': 'Набережные Челны',
+  };
+  function expandCityAbbr(name) {
+    if (!name) return name;
+    // Убираем ВСЕ точки (а не только в конце) и лишние пробелы - нужно, чтобы
+    // "Наб. Челны" и "Наб Челны" нормализовались в один и тот же ключ "НАБ ЧЕЛНЫ".
+    const key = name.trim().toUpperCase().replace(/\./g, '').replace(/\s+/g, ' ');
+    return CITY_ABBR[key] || name;
+  }
+
+  // Некоторые российские города сами содержат дефис в названии (Каменск-Уральский,
+  // Ростов-на-Дону...) - обычный разбор "первый дефис = граница маршрута" в таком
+  // случае режет город пополам. Прячем дефисы внутри известных названий перед
+  // разбором (заменяем на непечатаемый символ U+2011, не совпадающий с DASH_RE),
+  // после разбора возвращаем как есть. Список можно расширять как CITY_ABBR.
+  const HYPHENATED_CITIES = [
+    'Каменск-Уральский', 'Ростов-на-Дону', 'Комсомольск-на-Амуре', 'Йошкар-Ола',
+    'Гусь-Хрустальный', 'Орехово-Зуево', 'Наро-Фоминск', 'Переславль-Залесский',
+    'Кирово-Чепецк', 'Ликино-Дулёво', 'Южно-Сахалинск', 'Петропавловск-Камчатский',
+    'Санкт-Петербург',
+  ];
+  function protectHyphenatedCities(text) {
+    let result = text;
+    for (const city of HYPHENATED_CITIES) {
+      const re = new RegExp(city.replace(/-/g, '\\-'), 'gi');
+      result = result.replace(re, (m) => m.replace(/-/g, '‑'));
+    }
+    return result;
+  }
+  function restoreHyphens(s) { return s ? s.replace(/‑/g, '-') : s; }
+
+  function looksLikeCityToken(s) {
+    s = s.trim();
+    if (!s) return false;
+    if (/^\d/.test(s)) return false;
+    return /[а-яёА-ЯЁ]{2,}/.test(s);
+  }
+  function trimNoise(s) {
+    const words = s.trim().split(/\s+/);
+    while (words.length && NOISE_WORDS.test(words[words.length - 1])) words.pop();
+    while (words.length && NOISE_WORDS.test(words[0])) words.shift();
+    return words.join(' ').replace(/[.,]+$/, '').trim();
+  }
+
+  // Пометка ЗАГЛАВНЫМИ буквами отдельной строкой ("ГАРАНТИЯ !", "СРОЧНО") -
+  // формально похожа на город (кириллица, не с цифры), но города логисты
+  // капсом не пишут; известные КОРОТКИЕ сокращения городов капсом (МСК, СПБ)
+  // уже есть в CITY_ABBR - если капс-слово туда не разворачивается, это не город.
+  function isAllCapsNonCity(s) {
+    const cleaned = s.replace(/[!?.,;:]+$/g, '').trim();
+    if (!cleaned) return false;
+    if (!/^[А-ЯЁ\s]+$/.test(cleaned)) return false;
+    if (/\s/.test(cleaned)) return true;
+    return expandCityAbbr(cleaned) === cleaned;
+  }
+
+  // Карточки с внешних бирж объявлений часто присылают маршрут в виде двух
+  // ОТДЕЛЬНЫХ строк "Город (Регион)" подряд, без дефиса-разделителя вообще.
+  // Проверяем это раньше общей эвристики по строкам ниже: без этой проверки
+  // строки вроде "Рейс"/"Емкость машины: 40" тоже формально похожи на "город"
+  // и эвристика может выбрать их вместо настоящего.
+  // Скобки требуем и вокруг уточнения тоже (буквы/дефис/пробел/точка, без
+  // цифр) - иначе сюда же случайно попадают строки вида "Тент (110 м3)".
+  const CITY_PAREN_RE = /^([А-ЯЁ][А-ЯЁа-яё\-\s]*?)\s*\(([А-ЯЁ][А-ЯЁа-яё\-\s.]*)\)\s*$/;
+  const NOT_A_CITY = /^(тент|рефрижератор|реф|изотерм|борт|трал|контейнеровоз|бензовоз|фургон|самосвал|термос|рейс)$/i;
+  function extractCityParenRoute(originalLines) {
+    const found = [];
+    for (const line of originalLines) {
+      const m = line.match(CITY_PAREN_RE);
+      if (m && !NOT_A_CITY.test(m[1].trim())) found.push(m[1].trim());
+      if (found.length >= 2) break;
+    }
+    if (found.length < 2) return null;
+    return { from: expandCityAbbr(found[0]), to: expandCityAbbr(found[1]), raw: originalLines.slice(0, 2).join(' / ') };
+  }
+
+  function extractRoute(cleanedText, originalLines) {
+    const parenRoute = extractCityParenRoute(originalLines);
+    if (parenRoute) return parenRoute;
+
+    const protectedText = protectHyphenatedCities(cleanedText);
+    const lines = protectedText.split(/\n/).map(l => l.trim()).filter(Boolean);
+    let best = null;
+    for (const line of lines) {
+      if (!DASH_RE.test(line)) continue;
+      // Многоточечный маршрут ("Ижевск - Нытва - Пермь") - берём подряд идущие
+      // от начала сегменты, похожие на города; на первом непохожем (мусор
+      // после последнего реального города) цепочка обрывается.
+      const segments = line.split(DASH_RE).map((seg) => restoreHyphens(trimNoise(seg.trim())));
+      const cityChain = [];
+      for (const seg of segments) {
+        if (!looksLikeCityToken(seg)) break;
+        cityChain.push(seg);
+      }
+      if (cityChain.length >= 2) {
+        best = { from: cityChain[0], to: cityChain[cityChain.length - 1], raw: restoreHyphens(line.trim()) };
+        if (cityChain.length > 2) best.extraStops = cityChain.slice(1, -1);
+        break;
+      }
+    }
+    // Совсем короткий формат в одну строку без дефиса вообще - просто два
+    // сокращения городов через пробел ("новосиб ебург 450"). Срабатывает,
+    // только если ОБА слова - известные сокращения из CITY_ABBR.
+    if (!best && !/\n/.test(cleanedText.trim())) {
+      const words = cleanedText.trim().split(/\s+/).filter(Boolean);
+      if (words.length === 2) {
+        const from = expandCityAbbr(words[0]);
+        const to = expandCityAbbr(words[1]);
+        if (from !== words[0] && to !== words[1]) {
+          best = { from, to, raw: `${words[0]} ${words[1]}` };
+        }
+      }
+    }
+
+    // Одна строка вида "Обнинск Ижевск" - два города через пробел, БЕЗ дефиса
+    // (обычное имя, не сокращение из CITY_ABBR - тот случай уже обработан выше).
+    // Проверяем ДО общей эвристики по строкам ниже: иначе такая строка целиком
+    // становится "одним городом" и Откуда/Куда перепутываются. Оба слова
+    // должны выглядеть как настоящее имя города (с заглавной буквы, дальше
+    // строчные) - это отсекает ЗАГЛАВНЫЕ пометки вида "ДОГРУЗ 10".
+    if (!best) {
+      const properCityWordRe = /^[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)*$/;
+      for (const line of lines) {
+        const words = line.split(/\s+/).filter(Boolean);
+        if (words.length !== 2) continue;
+        if (!words.every((w) => properCityWordRe.test(w) && !NOT_A_CITY.test(w))) continue;
+        best = { from: words[0], to: words[1], raw: line };
+        break;
+      }
+    }
+
+    if (!best) {
+      const lineStopRe = /цена|ндс|\bкм\b|груз|прицеп|верхн|боков|задн|растентовк|начальн|рейс|ёмкост|емкост|грузоподъ/i;
+      const cityish = lines.filter(l => !lineStopRe.test(l) && !isAllCapsNonCity(l)).map(l => restoreHyphens(trimNoise(l)))
+        .filter(l => looksLikeCityToken(l) && l.split(' ').length <= 6);
+      if (cityish.length >= 2) best = { from: cityish[0], to: cityish[cityish.length - 1], raw: originalLines.join(' / '), guess: true };
+      else if (cityish.length === 1) best = { from: cityish[0], to: null, raw: cityish[0], guess: true };
+    }
+    if (best) {
+      best.from = expandCityAbbr(best.from);
+      best.to = expandCityAbbr(best.to);
+      if (best.extraStops) best.extraStops = best.extraStops.map(expandCityAbbr);
+    }
+    return best;
+  }
+
+  function extractDeclaredDistance(text) {
+    const re = new RegExp(NB() + '(\\d{2,6})\\s*км' + NA(), 'i');
+    const m = text.match(re);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function parseMessage(text) {
+    const originalLines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+    let working = text;
+    const d = extractDates(working); working = d.textAfterMask;
+    const t = extractTime(working); working = t.textAfterMask;
+    // Прицеп/вес/кол-во ТС - до цены, чтобы их числа не попали в "голое число = цена".
+    const tr = extractTrailer(working); working = tr.textAfterMask;
+    const w = extractWeight(working); working = w.textAfterMask;
+    const vc = extractVehicleCount(working); working = vc.textAfterMask;
+    const p = extractPrice(working); working = p.textAfterMask;
+    const route = extractRoute(working, originalLines);
+    const declaredDistanceKm = extractDeclaredDistance(text);
+    return { raw: text, route, price: p.price, dates: d.dates, datesAreAlternative: d.alternative, datesAreMultiOrder: d.multiOrder, time: t.time, trailer: tr.trailer, weight: w.weight, vehicleCount: vc.vehicleCount, declaredDistanceKm };
+  }
+
+  // utcOffset - смещение от UTC (в часах) города погрузки, если уже известно
+  // (см. estimateUtcOffsetForCity ниже - определяется по координатам через
+  // собственный геокодер CargoRun + библиотеку tz-lookup, БЕЗ разговорного
+  // справочника городов), либо null, если ещё не определено или не удалось.
+  function pickTime(parsed, settings, dateStr, utcOffset) {
+    const t = parsed.time;
+    const explicit = t.exact || t.before || t.from || t.after;
+    if (explicit) return explicit;
+    if (dateStr && dateStr === fmtDate(new Date())) {
+      const offset = (typeof utcOffset === 'number' && isFinite(utcOffset)) ? utcOffset : null;
+      const now = new Date();
+      if (offset !== null) {
+        // Считаем "сейчас" по месту погрузки через UTC, а не через часы этого
+        // компьютера - логист может открыть скрипт из другого часового пояса,
+        // чем город погрузки (вся сеть - от Калининграда до Владивостока).
+        let totalMin = now.getUTCHours() * 60 + now.getUTCMinutes() + offset * 60 + 180;
+        totalMin = ((totalMin % 1440) + 1440) % 1440;
+        // Округляем вверх до целого часа (11:50 -> 12:00), чтобы не ставить
+        // "рваное" время с минутами.
+        const roundedHour = (Math.ceil(totalMin / 60)) % 24;
+        return `${pad2(roundedHour)}:00`;
+      }
+      // Город погрузки не распознан по часовому поясу - запасной вариант,
+      // как раньше: часы этого компьютера + 3ч (обычно совпадает с Ижевском).
+      now.setHours(now.getHours() + 3);
+      if (now.getMinutes() > 0) now.setHours(now.getHours() + 1);
+      return `${pad2(now.getHours() % 24)}:00`;
+    }
+    return settings.defaultTime;
+  }
+  function pickDate(parsed) {
+    return parsed.dates && parsed.dates.length ? parsed.dates[0].date : fmtDate(new Date());
+  }
+
+  // Ramil нашёл, что на сайте (loads.cargorun.ru) поле "Дата въезда" в точке
+  // маршрута на самом деле поддерживает ИНТЕРВАЛ дат ("Дата въезда, от" /
+  // "Дата въезда, до" - появляется после галочки "Выбрать период прибытия"):
+  // "нашел что в каргоране можно указывать интервал дат, а как мы видим такая
+  // потребность есть. давай использовать эту возможность". Вместо того чтобы
+  // (как раньше) гадать ОДНУ "ближайшую" дату погрузки, когда в сообщении на
+  // самом деле назван ДИАПАЗОН/ОКНО из двух дней (диапазон дней недели
+  // "чт-пт", числовой диапазон "02-03.10" или обычное "или" между двумя
+  // датами - см. datesAreAlternative в extractDates) - теперь явно
+  // указываем на сайте интервал "от более ранней до более поздней даты".
+  // Возвращает вторую (более позднюю) дату окна, если она есть, иначе null -
+  // в последнем случае поле "Период прибытия" не трогаем, заполняем как
+  // раньше одну дату. НЕ путать с dateTo/hasExplicitDateTo - это ОТДЕЛЬНАЯ
+  // настоящая дата выгрузки, если она в сообщении названа явно (см. "02-03.10
+  // ... 06.10" - там одновременно есть и окно погрузки 02-03.10, и отдельная
+  // dateTo=06.10 - оба механизма работают независимо друг от друга).
+  function loadingDateWindowTo(parsed) {
+    if (!parsed || !Array.isArray(parsed.dates) || !parsed.datesAreAlternative) return null;
+    if (parsed.dates.length < 2) return null;
+    if (parsed.dates[0].date === parsed.dates[1].date) return null;
+    return parsed.dates[1].date;
+  }
+
+  // Время для ВТОРОЙ (более поздней) даты периода прибытия ("Дата въезда,
+  // до") - Ramil попросил ставить конец рабочего дня (19:00), а не то же
+  // самое время, что и у "от" (раньше по умолчанию получалось 09:00, как у
+  // обычной даты погрузки) - окно на весь день логичнее для даты "до".
+  const ARRIVAL_PERIOD_END_TIME = '19:00';
+
+  function addDaysToDateStr(dateStr, days) {
+    const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec((dateStr || '').trim());
+    if (!m) return dateStr;
+    const d = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+    d.setDate(d.getDate() + days);
+    return fmtDate(d);
+  }
+
+  // Проверка даты погрузки на правдоподобность - реальный случай от Ramil:
+  // диспетчер написал "01.09" вместо "01.10" (опечатка в месяце), дата ушла в
+  // прошлое, и это осталось незамеченным, а логист вручную нажал «Запустить в
+  // работу» на сайте, не заметив ошибку. Дата в прошлом или совсем
+  // неправдоподобно далеко в будущем - это почти всегда опечатка, а не
+  // осознанное решение логиста.
+  //
+  // Блокировка ЖЁСТКАЯ и работает ВСЕГДА - не только через галочку "Запустить
+  // в работу" в окне заявки (см. fillBtn.onclick), но и на саму настоящую
+  // кнопку «Запустить в работу» на сайте, если человек нажимает её сам, минуя
+  // наше окно (см. глобальный перехватчик кликов ниже, guardLaunchButtonClicks).
+  // Без диалога подтверждения - кнопка просто не срабатывает, пока дата не
+  // будет исправлена. Обычное заполнение формы при этом работает как всегда.
+  const MAX_FUTURE_LOAD_DAYS = 45; // дальше - почти наверняка опечатка в дате/годе, а не бронь настолько заранее
+  function loadDateSanityIssue(dateStr) {
+    const m = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec((dateStr || '').trim());
+    if (!m) return 'дата погрузки не распознана';
+    const d = new Date(parseInt(m[3], 10), parseInt(m[2], 10) - 1, parseInt(m[1], 10));
+    if (isNaN(d.getTime())) return 'дата погрузки не распознана';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    d.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((d - today) / 86400000);
+    if (diffDays < 0) return `дата погрузки уже в прошлом (${Math.abs(diffDays)} дн. назад)`;
+    if (diffDays > MAX_FUTURE_LOAD_DAYS) return `дата погрузки слишком далеко в будущем (через ${diffDays} дн.)`;
+    return null;
+  }
+
+  // Читает ТЕКУЩУЮ дату погрузки прямо с настоящего поля формы заказа на
+  // сайте (input[name="planEnterTime0"], значение вида "01.09.2026 09:00" -
+  // см. setDateTime ниже) и проверяет её через loadDateSanityIssue. Не
+  // зависит от нашего окна заявки вообще - работает, даже если логист его
+  // уже закрыл и правит дату прямо на сайте. Если поля нет на странице
+  // (не форма заказа) или дата в нём ещё не введена - возвращает null
+  // (ничего не блокируем "на всякий случай", только явно неправдоподобную дату).
+  function currentPickupDateIssue() {
+    const el = document.querySelector('input[name="planEnterTime0"]');
+    if (!el) return null;
+    const m = /(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/.exec(el.value || '');
+    if (!m) return null;
+    const dateStr = `${pad2(parseInt(m[1], 10))}.${pad2(parseInt(m[2], 10))}.${m[3]}`;
+    return loadDateSanityIssue(dateStr);
+  }
+
+  // Глобальный перехватчик клика по настоящей кнопке «Запустить в работу» на
+  // сайте - ставится ОДИН раз при старте скрипта (см. "5. СТАРТ" в конце) и
+  // работает независимо от окна заявки и галочек в нём. Слушаем клик на фазе
+  // ПОГРУЖЕНИЯ (capture: true) прямо на document - это срабатывает раньше
+  // собственного обработчика React у кнопки, поэтому clickLaunchIntoWork()
+  // (наш программный клик из fillBtn.onclick) тоже проходит через эту же
+  // проверку - двойная подстраховка не мешает, т.к. там дата уже проверена
+  // заранее и клик просто не вызывается, если она плохая.
+  function guardLaunchButtonClicks() {
+    document.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest && e.target.closest('button');
+      if (!btn || btn.textContent.trim() !== 'Запустить в работу') return;
+      const issue = currentPickupDateIssue();
+      if (issue) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        alert(`Нельзя запустить заказ в работу: ${issue}.\n\nПохоже на опечатку в дате погрузки - проверьте и исправьте её на форме заказа, затем попробуйте снова.`);
+      }
+    }, true);
+  }
+
+  /* ---- Оценка расстояния маршрута -> дата прибытия на выгрузку ----------
+   * Раньше дата выгрузки всегда ставилась равной дате погрузки, что неверно
+   * для дальних плеч. Считаем расстояние между точками (по гео-координатам
+   * из собственного геокодера CargoRun - того же, что открывает карту при
+   * выборе адреса в форме, отдельный API-ключ не нужен) и делим на пробег
+   * в сутки (settings.dailyRangeKm, по умолчанию 700). Если в самом
+   * сообщении логиста уже указано расстояние ("7232 км") - оно в приоритете
+   * как более точное. Итоговая дата выгрузки всегда попадает в форму
+   * подтверждения и может быть исправлена логистом вручную. */
+  // Один "сырой" запрос к геокодеру CargoRun. Возвращает { place, reason } -
+  // при неудаче place === null, а reason - короткое объяснение ПОЧЕМУ (нужно
+  // для диагностики "не удалось оценить расстояние", см. лог в recomputeDateTo
+  // ниже - раньше причина проглатывалась и в логе оставалось только "не
+  // удалось", без единой зацепки, что именно пошло не так).
+  async function geocodeCityAttempt(cityText) {
+    // AbortController-таймаут - без него "зависший" (без ответа) запрос к
+    // /api/Map/SearchAddresses держал бы весь расчёт даты выгрузки (а вместе
+    // с ним и кнопку "Заполнить на сайте", см. recomputeDateTo/pendingDateToCalc
+    // ниже) бесконечно, вообще без какой-либо обратной связи логисту.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    try {
+      const token = localStorage.getItem('token');
+      const headers = token ? { Authorization: 'Bearer ' + token } : {};
+      const res = await fetch('/api/Map/SearchAddresses?query=' + encodeURIComponent(cityText), { headers, signal: controller.signal });
+      if (!res.ok) return { place: null, reason: `сервер вернул ошибку HTTP ${res.status}` };
+      const arr = await res.json();
+      if (Array.isArray(arr) && arr.length) return { place: arr[0], reason: null };
+      return { place: null, reason: 'город не найден геокодером (пустой ответ)' };
+    } catch (e) {
+      return { place: null, reason: (e && e.name === 'AbortError') ? 'сервер не ответил за 6 секунд (тайм-аут)' : 'ошибка сети при обращении к геокодеру' };
+    } finally { clearTimeout(timeoutId); }
+  }
+
+  // Ramil столкнулся со случаем, когда расстояние не посчиталось для двух
+  // самых обычных городов (Екатеринбург-Москва) - похоже на разовый сетевой
+  // сбой/тайм-аут самого геокодера CargoRun, а не на нашу логику разбора.
+  // Один автоматический повтор при таком временном сбое (но НЕ при честном
+  // "город не найден" - это повторять бессмысленно) должен сгладить
+  // единичные заминки без дополнительных кликов логиста.
+  async function geocodeCity(cityText) {
+    let result = await geocodeCityAttempt(cityText);
+    if (!result.place && result.reason && result.reason !== 'город не найден геокодером (пустой ответ)') {
+      result = await geocodeCityAttempt(cityText);
+    }
+    return result;
+  }
+
+  function haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const toRad = (d) => (d * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1), dLon = toRad(lon2 - lon1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+  }
+
+  // Кэш геокодирования "город -> координаты" на время открытой страницы -
+  // и расчёт расстояния (estimateRouteKm), и определение часового пояса
+  // (estimateUtcOffsetForCity ниже) одинаково геокодируют город "откуда", без
+  // кэша это был бы ДВОЙНОЙ запрос к /api/Map/SearchAddresses за одно и то же.
+  // Кэшируем сам промис (а не только результат) - если оба вызова происходят
+  // почти одновременно, они дождутся ОДНОГО запроса, а не запустят по своему.
+  const geocodeCache = new Map();
+  function geocodeCityCached(cityText) {
+    const key = (cityText || '').trim().toLowerCase();
+    if (!key) return Promise.resolve({ place: null, reason: 'пустое название города' });
+    if (!geocodeCache.has(key)) geocodeCache.set(key, geocodeCity(cityText));
+    return geocodeCache.get(key);
+  }
+
+  async function estimateRouteKm(fromCity, toCity, settings) {
+    const [a, b] = await Promise.all([geocodeCityCached(fromCity), geocodeCityCached(toCity)]);
+    if (!a.place || !b.place) {
+      const reasons = [];
+      if (!a.place) reasons.push(`«${fromCity}» - ${a.reason}`);
+      if (!b.place) reasons.push(`«${toCity}» - ${b.reason}`);
+      return { km: null, reason: reasons.join('; ') };
+    }
+    return { km: Math.round(haversineKm(a.place.latitude, a.place.longitude, b.place.latitude, b.place.longitude) * settings.roadFactor), reason: null };
+  }
+
+  // Часовой пояс города погрузки - раньше искали по разговорному справочнику
+  // городов (легко пропустить город, см. историю с Подольском), теперь считаем
+  // по координатам: тот же геокодер CargoRun, что и для расстояния (см. выше),
+  // + библиотека tz-lookup (координаты -> IANA-зона, "Europe/Moscow" и т.п.,
+  // подключена через @require в шапке скрипта) + встроенный в браузер
+  // Intl.DateTimeFormat (IANA-зона -> текущее смещение от UTC в часах). Работает
+  // для ЛЮБОГО города, который найдёт геокодер - справочник больше не нужен и
+  // расширять его вручную для новых городов тоже больше не нужно.
+  // Возвращает null, если город не нашёлся или что-то пошло не так - тогда
+  // используется старый запасной вариант (часы компьютера логиста +3ч).
+  const utcOffsetCache = new Map();
+  async function estimateUtcOffsetForCity(cityText) {
+    const key = (cityText || '').trim().toLowerCase();
+    if (!key) return null;
+    if (utcOffsetCache.has(key)) return utcOffsetCache.get(key);
+    const resultPromise = (async () => {
+      try {
+        const geo = await geocodeCityCached(cityText);
+        if (!geo.place) return null;
+        const zone = tzlookup(geo.place.latitude, geo.place.longitude);
+        const parts = new Intl.DateTimeFormat('en-US', { timeZone: zone, timeZoneName: 'shortOffset' }).formatToParts(new Date());
+        const offsetPart = parts.find((p) => p.type === 'timeZoneName');
+        const m = offsetPart && offsetPart.value.match(/GMT([+-]\d+)/);
+        return m ? parseInt(m[1], 10) : null;
+      } catch (e) {
+        // tz-lookup не загрузился (@require не сработал) или координаты вне
+        // допустимого диапазона - не удалось определить, не страшно, дальше
+        // сработает запасной вариант.
+        return null;
+      }
+    })();
+    utcOffsetCache.set(key, resultPromise);
+    return resultPromise;
+  }
+
+  // Есть ли в сообщении ОТДЕЛЬНО названная, явная дата выгрузки (а не просто
+  // вторая дата из окна/альтернативы для погрузки) - используется и в
+  // computeDateTo() ниже (приоритет над оценкой по расстоянию), и в
+  // fillBtn.onclick (dateToIsExplicit - не пересчитывать дату КОНЕЧНОЙ точки
+  // при нескольких точках маршрута, см. computeDropPointDates). Два случая:
+  // (1) ровно 2 (и более - на всякий случай) даты, и это НЕ окно/альтернатива
+  // ("29.09" и "30.09" прямо как пара погрузка/выгрузка, без "или"/"чт-пт"/
+  // "02-03.10" и т.п.) - вторая дата и есть дата выгрузки (как раньше);
+  // (2) 3+ даты, и это окно/альтернатива (например "02-03.10 Пермь -
+  // Новосибирск 06.10 ..." - Ramil: "02-03.10 это интервал дат погрузки") -
+  // первые даты это ОКНО для погрузки, а ПОСЛЕДНЯЯ по порядку дата - это
+  // отдельно названная дата выгрузки (см. dayRangeWithMonthRe в extractDates).
+  function hasExplicitDateTo(parsed) {
+    if (!parsed || !Array.isArray(parsed.dates) || parsed.datesAreMultiOrder) return false;
+    if (parsed.dates.length > 1 && !parsed.datesAreAlternative) return true;
+    if (parsed.dates.length > 2 && parsed.datesAreAlternative) return true;
+    return false;
+  }
+  function explicitDateToValue(parsed) {
+    if (!hasExplicitDateTo(parsed)) return null;
+    return parsed.datesAreAlternative ? parsed.dates[parsed.dates.length - 1].date : parsed.dates[1].date;
+  }
+
+  // Возвращает { dateTo, km, source } - source: 'explicit' | 'declared' | 'estimate' | null (не удалось посчитать)
+  async function computeDateTo(parsed, dateFromStr, settings) {
+    // Если в самом сообщении явно названа дата выгрузки (см. hasExplicitDateTo
+    // выше - либо обычная пара из двух дат, либо окно для погрузки плюс
+    // отдельная дата выгрузки) - доверяем ей напрямую, это надёжнее любой
+    // оценки по расстоянию.
+    if (hasExplicitDateTo(parsed)) {
+      return { dateTo: explicitDateToValue(parsed), km: null, source: 'explicit' };
+    }
+    if (parsed.declaredDistanceKm) {
+      const days = Math.ceil(parsed.declaredDistanceKm / settings.dailyRangeKm);
+      return { dateTo: addDaysToDateStr(dateFromStr, days), km: parsed.declaredDistanceKm, source: 'declared' };
+    }
+    if (parsed.route && parsed.route.from && parsed.route.to) {
+      const est = await estimateRouteKm(parsed.route.from, parsed.route.to, settings);
+      if (est.km) {
+        const days = Math.ceil(est.km / settings.dailyRangeKm);
+        return { dateTo: addDaysToDateStr(dateFromStr, days), km: est.km, source: 'estimate' };
+      }
+      return { dateTo: dateFromStr, km: null, source: null, reason: est.reason };
+    }
+    return { dateTo: dateFromStr, km: null, source: null, reason: 'в сообщении не распознан маршрут (откуда/куда)' };
+  }
+
+  /* =========================================================================
+   *  1.5. РАСПОЗНАВАНИЕ ЧЕРЕЗ YANDEXGPT (по кнопке, не заменяет обычный разбор)
+   *  Обычный regex-разбор выше остаётся основным - бесплатный и мгновенный,
+   *  работает без интернета к сторонним сервисам. YandexGPT вызывается только
+   *  по отдельной кнопке "Распознать через ИИ" - для сообщений, которые
+   *  regex в принципе не может разобрать (сложные табличные сообщения с
+   *  несколькими заказами/направлениями сразу). Промпт явно требует не
+   *  угадывать: если поле нельзя определить однозначно - модель должна
+   *  вернуть null, а не придумать правдоподобное значение.
+   * ========================================================================= */
+  function gmRequest(opts) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest(Object.assign({}, opts, {
+        onload: (res) => resolve(res),
+        onerror: (err) => reject(new Error('Сетевая ошибка запроса к YandexGPT' + (err && err.error ? ': ' + err.error : ''))),
+        ontimeout: () => reject(new Error('YandexGPT не ответил за отведённое время (таймаут).')),
+      }));
+    });
+  }
+
+  // Названия дней недели по номеру Date#getDay() (воскресенье=0) - нужны
+  // только для buildAiPrompt ниже (сказать модели, какой сегодня день
+  // недели, чтобы она могла сама посчитать "на чт"/"чт-пт" и т.п.).
+  const AI_WEEKDAY_NAMES_RU = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+
+  function buildAiPrompt(text) {
+    const today = new Date();
+    const todayStr = fmtDate(today);
+    const todayWeekdayName = AI_WEEKDAY_NAMES_RU[today.getDay()];
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowStr = fmtDate(tomorrow);
+    const exampleYear = today.getFullYear();
+    return `Ты помогаешь диспетчеру транспортной компании (грузоперевозки по России) разобрать сообщение с заявкой на перевозку.
+Разбери сообщение ниже и верни ТОЛЬКО валидный JSON-массив, без markdown-разметки и без пояснений вокруг. Один элемент массива - один отдельный ЗАКАЗ, то есть один рейс ОДНОЙ машины с ОДНОЙ ставкой (ценой перевозки).
+
+Сегодняшняя дата: ${todayStr} (это ${todayWeekdayName}). Используй её как точку отсчёта:
+- если дата в сообщении указана БЕЗ года (например "29.09" или "29.09.25") - подставь правильный год сама/сам, ориентируясь на сегодняшнюю дату (${todayStr}), если в сообщении явно не назван другой год;
+- слово "сегодня" в сообщении означает ${todayStr}, слово "завтра" означает ${tomorrowStr};
+- день недели БЕЗ числа ("пн"/"вт"/"ср"/"чт"/"пт"/"сб"/"вс" или полностью "понедельник".."воскресенье", часто с предлогом - "на чт", "в пятницу") означает БЛИЖАЙШИЙ такой день считая от сегодняшней даты (${todayStr}, это ${todayWeekdayName}) ВКЛЮЧИТЕЛЬНО - то есть если сегодня и есть нужный день недели, это сегодня, а не через неделю;
+- ДВА дня недели подряд через дефис ("чт-пт", "чт - пт", "четверг-пятница") - это НЕ "погрузка в первый день, выгрузка во второй", а ОКНО для погрузки: подходит любой из двух дней (то же самое, что обычное "или" между двумя числами, просто без слова "или"). В этом случае "date" = БЛИЖАЙШИЙ (он же более ранний) из двух названных дней считая от сегодняшней даты, а "dateWindowTo" = ВТОРОЙ (более поздний) день окна - на сайте логиста это превратится в настоящий период дат для погрузки (поле "от"/"до"), а не в одну угаданную дату. "dateTo" в этом случае - null (дата ВЫГРУЗКИ этим диапазоном никак не задана и не должна из него выводиться - не путай "dateWindowTo", это окно для ПОГРУЗКИ, с "dateTo", это дата ВЫГРУЗКИ);
+- ДВА числа дня подряд через дефис с ОДНИМ месяцем на двоих ("02-03.10", "02-03.10.26" - у ВТОРОГО числа есть точка и месяц, а у первого своей точки нет) - это ТО ЖЕ САМОЕ, что и диапазон дней недели выше: ОКНО для погрузки (годится 2 или 3 октября), а НЕ пара "погрузка 2-го, выгрузка 3-го". В этом случае "date" = БЛИЖАЙШИЙ (более ранний) из двух названных дней считая от сегодняшней даты, "dateWindowTo" = ВТОРОЙ (более поздний) день этого же окна. Если при этом ДАЛЬШЕ в сообщении (например, после маршрута) названа ЕЩЁ ОДНА дата ОТДЕЛЬНО - это и есть настоящая "dateTo" (дата ВЫГРУЗКИ, независимо от "dateWindowTo" выше), её нужно взять оттуда, а НЕ второе число из диапазона "02-03.10". Если отдельной третьей даты в сообщении нет - "dateTo" = null (как и для диапазона дней недели), а "dateWindowTo" всё равно заполняется датой окна. Не путай этот случай с диапазоном ДВУХ ПОЛНЫХ дат, где у КАЖДОГО числа есть своя точка/месяц ("25.09-28.09" или "25.09 - 28.09") - это уже обычная пара погрузка/выгрузка ("date"="25.09...", "dateTo"="28.09...", "dateWindowTo"=null), а не окно;
+- обычное слово "или"/"либо" между ДВУМЯ датами погрузки ("25.09 или 28.09 Казань - Уфа") - ТО ЖЕ САМОЕ окно для погрузки, что и диапазоны выше, просто явным словом вместо дефиса: "date" = более ранняя из двух дат, "dateWindowTo" = более поздняя. Не путай с диапазоном ДВУХ ПОЛНЫХ дат без слова "или"/"либо" ("25.09-28.09") - это обычная пара погрузка/выгрузка, см. выше;
+- поле "date" (и "dateTo"/"dateWindowTo", если они есть) ВСЕГДА должно быть полной датой в формате дд.мм.гггг с настоящим 4-значным годом. НИКОГДА не пиши плейсхолдеры или незаполненные части вроде "<год>", "гггг", "XXXX" и т.п. - если год в принципе невозможно определить (что бывает крайне редко, так как сегодняшняя дата дана выше), лучше поставь null для всего поля "date", чем неполное значение.
+
+ГЛАВНОЕ ПРАВИЛО, как отличить "один заказ с несколькими точками выгрузки" от "нескольких разных заказов":
+- Если в сообщении ОДНА точка погрузки и указана ТОЛЬКО ОДНА общая цена/ставка за всё сообщение - это ВСЕГДА ОДИН заказ, даже если точек выгрузки несколько (2 и более), даже если у них разное время выгрузки, разные получатели (разные ООО/АО) или они пронумерованы списком (“1. ...”, “2. ...”). В этом случае: "to" - последняя (конечная) точка выгрузки, а все остальные точки выгрузки (по порядку, как в сообщении) - в массив "extraStops". Если несколько точек выгрузки находятся в одном и том же городе, но у разных получателей (разных компаний) - всё равно пиши город в "to"/"extraStops" как есть, а НАЗВАНИЯ ПОЛУЧАТЕЛЕЙ и их время выгрузки укажи в поле "comment" (например: "Выгрузка 1: ООО Агроторг в 04:30; Выгрузка 2: АО Тандер в 08:00") - логист сверит точные адреса на сайте сам.
+- Разбивай на НЕСКОЛЬКО отдельных заказов (несколько элементов массива) ТОЛЬКО если у каждого направления/дня в сообщении указана СВОЯ ОТДЕЛЬНАЯ цена (то есть в сообщении несколько разных сумм денег, каждая привязана к своему направлению или дню) - например, из одного города несколько дней подряд возят в разные города за разные деньги.
+
+Пример 1 (ОДИН заказ, несмотря на несколько точек выгрузки - в сообщении всего ОДНА цена; год в дате не назван - берём из сегодняшней даты выше, ${exampleYear}):
+"""
+Погрузка: Екат, ул. Черняховского, 106
+Выгрузки:
+1. 29.09 04:30 ООО АГРОТОРГ Тюмень
+2. 29.09 08:00 АО ТАНДЕР Тюмень.
+26пал/8тн. Кофе.
+65 000р. б/ндс
+"""
+→ один элемент массива: from="Екатеринбург, ул. Черняховского, 106" (в сообщении дан точный адрес погрузки - пишем его целиком, а не просто "Екатеринбург", см. правило про точность адреса выше), to="Тюмень" (тут точного адреса не дано - просто город), extraStops=["Тюмень"], date="29.09.${exampleYear}", priceAmount=65000, vat=false, weight=8, cargoType="Кофе", comment="Выгрузка 1: ООО Агроторг в 04:30; Выгрузка 2: АО Тандер в 08:00, 26 паллет".
+
+Пример 2 (ДВА отдельных заказа - у каждого направления своя цена):
+"""
+Ижевск - Казань 25.09 - 40тр
+Ижевск - Пермь 26.09 - 35тр
+"""
+→ два элемента массива (разные from/to/date/priceAmount у каждого, год у обеих дат - ${exampleYear}, взят из сегодняшней даты выше).
+
+Пример 3 (МНОГО отдельных заказов из ОДНОЙ точки погрузки с точным адресом - у каждого направления своя цена, точный адрес погрузки повторяется у ВСЕХ заказов):
+"""
+ООО «Компания»
+Ульяновская обл., р.п. Новоспасское (М5), ул. Заводская 57
+Актуальные загрузки:
+Мск 70 т.р
+Владимир 70 т.р.
+Казань 50 т.р.
+"""
+→ три элемента массива, и у КАЖДОГО from="Ульяновская обл., р.п. Новоспасское, ул. Заводская 57" (точный адрес погрузки из начала сообщения - относится ко всем направлениям списка, а не только к первому; "(М5)" - ссылка на трассу, в адрес не входит), а to берётся как есть по каждой строке: "Москва" (70000 руб.), "Владимир" (70000 руб.), "Казань" (50000 руб.).
+
+Пример 4 (дата задана ОКНОМ из двух дней недели подряд, без чисел вообще - см. правило выше):
+"""
+Нижний Тагил - Хабаровск на чт-пт 490 000
+"""
+→ один элемент массива: from="Нижний Тагил", to="Хабаровск", priceAmount=490000. "на чт-пт" - это НЕ "погрузка в четверг, выгрузка в пятницу", а окно из двух дней, любой из которых подходит для погрузки: "date" = ближайший (он же более ранний) из двух дней (четверг или пятница) считая от сегодняшней даты (${todayStr}) включительно - если сегодня и есть один из этих дней, это сегодня; "dateWindowTo" = второй (более поздний) день этого же окна; "dateTo" = null (диапазон дней недели ничего не говорит про дату ВЫГРУЗКИ - не путай с "dateWindowTo").
+
+Пример 5 (дата ПОГРУЗКИ задана числовым окном "ДД-ДД.ММ", а дата ВЫГРУЗКИ названа отдельно после маршрута - см. правило выше):
+"""
+02-03.10 Пермь - Новосибирск 06.10 200т
+"""
+→ один элемент массива: from="Пермь", to="Новосибирск", weight=200. "02-03.10" - это НЕ "погрузка 2-го, выгрузка 3-го", а окно из двух дней для погрузки (годится 2 или 3 октября): "date" = более ранняя из двух дат окна (02.10.${exampleYear}), "dateWindowTo" = более поздняя дата этого же окна (03.10.${exampleYear}). "06.10", названная ОТДЕЛЬНО после маршрута - это и есть настоящая дата ВЫГРУЗКИ: "dateTo" = "06.10.${exampleYear}" (а НЕ "03.10.${exampleYear}" - второе число диапазона погрузки это "dateWindowTo", а не "dateTo", и подставлять его в "dateTo" нельзя).
+
+Про НДС и наличный расчёт - это РАЗНЫЕ вещи, не путай их:
+- "без НДС" (или "б/ндс") - обычная безналичная ставка, но без НДС в цене. У такой ставки vat=false, cashPayment=false. Саму сумму (priceAmount) указывай РОВНО ТАК, как написано в сообщении, ничего не пересчитывай и не увеличивай - пересчётом (если он нужен) занимается отдельный код, не ты.
+- "нал"/"наличные"/"наличный расчёт" - оплата наличными. У такой ставки vat=false, cashPayment=true. Сумму тоже указывай ровно как в сообщении, без изменений.
+- Если ни то, ни другое не упомянуто - vat=null, cashPayment=false.
+
+Про объём кузова и вес груза - это ТОЖЕ РАЗНЫЕ вещи, не путай их:
+- "110мз", "110 м3", "110м³", "110 куб.м" - это ОБЪЁМ кузова в кубометрах (сколько места в фуре), а НЕ вес груза. "мз" - это разговорное сокращение/опечатка диспетчеров вместо "м3", означает то же самое. Такое число НИКОГДА не пиши в поле "weight" - в сообщении вида "110мз - 720 нал" у груза вообще не указан вес, поэтому weight=null.
+- В поле "weight" пиши число ТОЛЬКО если в сообщении явно указан вес в тоннах/кг ("20т", "20 тонн", "вес 5000 кг" и т.п.). Если такого явного указания веса нет - weight=null, даже если рядом с ценой встречается число с "мз"/"м3".
+
+Про адрес погрузки/выгрузки ("from"/"to"/"extraStops") - ВСЕГДА указывай его максимально ТОЧНО, а не просто городом, если в сообщении есть более точная информация:
+- Если рядом с городом в сообщении названы область/район, конкретный населённый пункт (посёлок, село и т.п.), улица и номер дома - указывай ВЕСЬ этот адрес целиком одной строкой (область, населённый пункт, улица, дом), а не только город. Пример: если в сообщении написано "Ульяновская обл., р.п. Новоспасское (М5), ул. Заводская 57" - пиши "Ульяновская обл., р.п. Новоспасское, ул. Заводская 57" (пометку вроде "(М5)" - это просто ссылка на трассу, часть настоящего адреса дома она не пишется на карте - в адрес не включай, но при желании можно упомянуть в "comment").
+- Точный адрес, названный в начале сообщения (например, адрес погрузки), одинаково относится КО ВСЕМ заказам, которые из него получаются (даже если это сообщение с несколькими разными направлениями/ценами - см. правило выше про разбивку на несколько заказов) - подставляй его в "from" каждого из них, а не только у первого.
+- Если в сообщении назван ТОЛЬКО город/населённый пункт без улицы и дома (например, просто "Мск" или "Владимир" в списке направлений) - пиши как есть, просто город, ничего не придумывай и не добавляй.
+
+Формат каждого элемента строго такой (все поля обязательны в объекте, значение - null, если неизвестно):
+{
+  "from": "адрес погрузки - см. правило выше про точность (город, а если есть - то полный адрес с улицей и домом) - или null",
+  "to": "адрес выгрузки, конечная точка - по тому же правилу точности, что и \"from\" выше, - или null",
+  "extraStops": ["промежуточные адреса выгрузки по пути к конечной (тот же принцип точности), если есть - иначе пустой массив"],
+  "date": "дата погрузки в формате дд.мм.гггг с полным 4-значным годом (см. правило про сегодняшнюю дату выше), или null",
+  "dateTo": "дата выгрузки в формате дд.мм.гггг, ТОЛЬКО если явно указана в сообщении отдельно от даты погрузки, иначе null",
+  "dateWindowTo": "ВТОРАЯ (более поздняя) дата ОКНА для погрузки в формате дд.мм.гггг, ТОЛЬКО если дата погрузки задана диапазоном/окном из двух дней (диапазон дней недели, числовой диапазон ДД-ДД.ММ или \"или\"/\"либо\" между двумя датами - см. правила выше), иначе null. Это НЕ дата выгрузки - независимо от \"dateTo\" выше",
+  "time": "время погрузки в формате чч:мм, если указано, иначе null",
+  "priceAmount": число рублей (стоимость перевозки) или null,
+  "priceNegotiable": true если цена договорная/торг, иначе false,
+  "vat": true (явно указано "с НДС") / false (явно указано "без НДС" ИЛИ указано "нал"/наличный расчёт) / null (в сообщении вообще не указано ни то, ни другое),
+  "cashPayment": true, ТОЛЬКО если в сообщении прямо написано "нал"/"наличные"/"наличный расчёт" - false во всех остальных случаях, включая обычное "без НДС" (это РАЗНЫЕ вещи: "без НДС" и "нал" - не путай их, даже если оба варианта означают vat=false),
+  "trailerTypes": ["тент" | "рефрижератор" | "изотермический" | другие типы прицепа, упомянутые в сообщении; пустой массив, если не указано] - слово "термос" означает ТОТ ЖЕ САМЫЙ изотермический прицеп (просто другое разговорное название у диспетчеров), пиши в этом случае "изотермический", а не "термос",
+  "weight": число тонн (вес груза) или null - НЕ путай с объёмом кузова ("мз"/"м3"/"м³"/"куб.м" - это ВСЕГДА объём, а не вес, см. пояснение выше),
+  "cargoType": "тип груза текстом, если назван в сообщении, иначе null",
+  "vehicleCount": число требуемых ТС или null,
+  "comment": "любые важные детали из сообщения, которые не поместились в другие поля (особые условия, контакты и т.п.), или null"
+}
+
+ВАЖНО: если какое-то поле нельзя определить однозначно и уверенно - ставь null. НЕ угадывай и не придумывай данные, которых нет в тексте сообщения.
+
+Сообщение диспетчера:
+"""
+${text}
+"""`;
+  }
+
+  // Отправляет текст в YandexGPT (Yandex Cloud Foundation Models API) и
+  // возвращает МАССИВ распознанных заказов (обычно 1 элемент, может быть
+  // больше - см. buildAiPrompt). Бросает Error с понятным логисту текстом
+  // при любой проблеме (не настроено/сеть/невалидный ответ).
+  async function callYandexGPT(text, settings) {
+    if (!settings.yandexApiKey || !settings.yandexFolderId) {
+      throw new Error('YandexGPT не настроен. Откройте меню расширения Tampermonkey → "Настройки YandexGPT (API-ключ)" и укажите API-ключ и Folder ID.');
+    }
+    const body = {
+      modelUri: `gpt://${settings.yandexFolderId}/${settings.yandexModel || 'yandexgpt-5.1'}`,
+      // maxTokens: сообщение может содержать сразу МНОГО отдельных заказов
+      // (например, список актуальных загрузок из одной точки погрузки на
+      // десяток+ разных направлений, у каждого своя цена - тогда, по
+      // ГЛАВНОМУ ПРАВИЛУ выше, это много отдельных элементов JSON-массива).
+      // При 2000 токенов ответ на такое сообщение обрезался ровно посередине
+      // JSON (Yandex останавливал генерацию по лимиту) - это ломало разбор
+      // ВСЕГО ответа, а не только "лишних" заказов сверх лимита. 8000 -
+      // максимум, который допускают модели YandexGPT для одного ответа, и
+      // его достаточно на несколько десятков заказов сразу.
+      completionOptions: { stream: false, temperature: 0.1, maxTokens: 8000 },
+      messages: [{ role: 'user', text: buildAiPrompt(text) }],
+    };
+    const res = await gmRequest({
+      method: 'POST',
+      url: 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Api-Key ${settings.yandexApiKey}` },
+      data: JSON.stringify(body),
+      timeout: 30000,
+    });
+    if (res.status < 200 || res.status >= 300) {
+      let reason = (res.responseText || '').slice(0, 300);
+      throw new Error(`YandexGPT вернул ошибку ${res.status}${reason ? ': ' + reason : ''}. Проверьте API-ключ и Folder ID в настройках.`);
+    }
+    let parsed;
+    try { parsed = JSON.parse(res.responseText); } catch (e) {
+      throw new Error('Не удалось разобрать ответ YandexGPT (пришёл не JSON).');
+    }
+    const alternatives = (parsed.result && parsed.result.alternatives) || parsed.alternatives;
+    const messageText = alternatives && alternatives[0] && alternatives[0].message && alternatives[0].message.text;
+    if (!messageText) throw new Error('YandexGPT не вернул текст ответа.');
+    // Модель иногда оборачивает JSON в markdown код-блок (```json ... ```)
+    // несмотря на прямую просьбу этого не делать - снимаем обёртку перед парсингом.
+    let jsonText = messageText.trim();
+    const fenceMatch = jsonText.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fenceMatch) jsonText = fenceMatch[1];
+    let orders;
+    try { orders = JSON.parse(jsonText); } catch (e) {
+      // Самая частая причина невалидного JSON - ответ модели оборвался
+      // ровно посередине (упёрся в лимит maxTokens), например если в
+      // сообщении сразу МНОГО отдельных заказов (список загрузок на много
+      // направлений). Отличаем такой обрыв от прочих ошибок по простому
+      // признаку - текст не заканчивается на "]" (закрытие массива), и даём
+      // логисту понятную подсказку, а не просто кусок сырого JSON.
+      const looksTruncated = !jsonText.trim().endsWith(']');
+      const hint = looksTruncated
+        ? ' Похоже, ответ модели оборвался на середине (вероятно, в сообщении слишком много отдельных заказов сразу) - попробуйте разбить сообщение на 2-3 части поменьше и распознать их по отдельности.'
+        : '';
+      throw new Error('YandexGPT вернул текст, который не получилось разобрать как JSON:' + hint + ' ' + jsonText.slice(0, 200));
+    }
+    if (!Array.isArray(orders)) orders = [orders];
+    return orders;
+  }
+
+  /* =========================================================================
+   *  2. DOM-АВТОМАТИЗАЦИЯ ФОРМЫ CARGORUN
+   *  Сайт написан на React; обычная установка el.value не работает для полей,
+   *  привязанных к состоянию компонента, - используем нативный сеттер +
+   *  синтетическое InputEvent (см. README, раздел "Как это работает").
+   * ========================================================================= */
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  function setNativeValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? REAL_WINDOW.HTMLTextAreaElement.prototype : REAL_WINDOW.HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+    setter.call(el, value);
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, data: String(value), inputType: 'insertText' }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  function fireMouseSeq(el) {
+    ['mousedown', 'mouseup', 'click'].forEach(type => {
+      el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: REAL_WINDOW, button: 0 }));
+    });
+  }
+
+  // Галочка "Выбрать период прибытия" на настоящем сайте - проверено вручную
+  // (DevTools) - рендерится ВНУТРИ открытого календаря выбора даты (как часть
+  // его "подвала", вместе со списком времени), с id="showSecondDateCheckbox"
+  // и существует в DOM, только пока этот календарь открыт (один и тот же id у
+  // любой точки маршрута - сайт рендерит только один открытый календарь за
+  // раз). Ищем сначала по id (быстрее), а если сайт его вдруг уберёт/поменяет -
+  // запасной вариант по тексту подписи, чтобы не сломаться молча.
+  function findArrivalPeriodCheckbox() {
+    const byId = document.querySelector('#showSecondDateCheckbox');
+    if (byId) return byId;
+    return Array.from(document.querySelectorAll('input[type="checkbox"]')).find((cb) => {
+      const lbl = cb.closest('label') || (cb.parentElement && cb.parentElement.querySelector('label'));
+      return lbl && /период прибытия/i.test(lbl.textContent);
+    }) || null;
+  }
+
+  // Открыть выпадающий список react-select. Для "обычных" (с поиском) полей
+  // достаточно клика (fireMouseSeq), но для полей-переключателей без поиска
+  // (например, "Отображение заказа") клик по самому input иногда не
+  // срабатывает - там надёжно открывает список именно стрелка вниз после
+  // фокуса. Делаем и то, и другое - лишний клик/нажатие не мешает, если
+  // список уже открылся первым способом.
+  function openReactSelect(el) {
+    fireMouseSeq(el);
+    el.focus();
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', code: 'ArrowDown', bubbles: true, cancelable: true }));
+  }
+
+  async function waitFor(fn, timeout = 4000, interval = 100) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const v = fn();
+      if (v) return v;
+      await sleep(interval);
+    }
+    return null;
+  }
+
+  async function openOrderForm(log) {
+    if (!location.pathname.startsWith('/orders')) {
+      location.href = 'https://loads.cargorun.ru/orders/new';
+      await sleep(1500);
+    }
+    let panel = document.querySelector('input[name="trucksCount"]');
+    if (panel) return true;
+    const newOrderBtn = await waitFor(() =>
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Новый заказ'));
+    if (!newOrderBtn) { log('Не нашёл кнопку "Новый заказ" - откройте форму вручную.'); return false; }
+    newOrderBtn.click();
+    panel = await waitFor(() => document.querySelector('input[name="trucksCount"]'));
+    return !!panel;
+  }
+
+  async function fillAddress(locationInputName, cityText, log) {
+    const trigger = document.querySelector(`input[name="${locationInputName}"]`);
+    if (!trigger) { log(`Не нашёл поле адреса ${locationInputName}`); return false; }
+    trigger.click();
+    await sleep(400);
+    // Ищем полноширинный поисковый инпут карточки-оверлея (placeholder " " или пустой, самый широкий).
+    const searchInput = await waitFor(() => {
+      const inputs = Array.from(document.querySelectorAll('input[type="text"]')).filter(i => i.offsetParent !== null);
+      // У оверлея карты строка поиска имеет placeholder=" " (один пробел) - так отличаем
+      // её от других широких текстовых полей формы (например "Стоимость заказа").
+      return inputs.find(i => i.placeholder === ' ')
+        || inputs.find(i => i.getBoundingClientRect().width > 400 && !i.placeholder);
+    });
+    if (!searchInput) { log('Не нашёл строку поиска адреса.'); return false; }
+    setNativeValue(searchInput, cityText);
+    let results = await waitFor(() => {
+      const items = document.querySelectorAll('.address__result-item');
+      return items.length ? items : null;
+    }, 5000);
+    if (!results) {
+      // Первый поиск после открытия сайта иногда идёт медленнее (холодный запрос) - пробуем ещё раз.
+      setNativeValue(searchInput, cityText + ' ');
+      setNativeValue(searchInput, cityText);
+      results = await waitFor(() => {
+        const items = document.querySelectorAll('.address__result-item');
+        return items.length ? items : null;
+      }, 5000);
+    }
+    if (!results) { log(`Нет результатов поиска для "${cityText}" - заполните адрес вручную.`); return false; }
+    // Предпочитаем результат, у которого заголовок точно совпадает с введённым городом.
+    const arr = Array.from(results);
+    const exact = arr.find(it => {
+      const title = it.querySelector('.address__result-item--title');
+      return title && title.textContent.trim().toLowerCase() === cityText.trim().toLowerCase();
+    });
+    (exact || arr[0]).click();
+    await sleep(300);
+    const confirmBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Подтвердить');
+    if (confirmBtn) confirmBtn.click();
+    await sleep(300);
+    return true;
+  }
+
+  // "Город для АТИ" - отдельное react-select поле на каждой точке маршрута
+  // (id "atiCityInput_{N}", где N - тот же индекс, что и у location{N}).
+  // Справочник этого поля - города биржи АТИ.SU, варианты выглядят как
+  // "Город, Область/Республика" (например, "Ижевск, Удмуртская Республика"),
+  // поэтому ищем вариант, у которого часть ДО запятой точно совпадает с
+  // распознанным городом - иначе по простой подстроке для "Ижевск" может
+  // подхватиться "Ижевское с., Рязанская область" (тоже содержит "ижевск").
+  // По указанию Ramil поле "Город для АТИ" автозаполняем ТОЛЬКО когда точка
+  // маршрута - Москва или Санкт-Петербург (в остальных городах это поле не
+  // трогаем вообще, оставляем логисту заполнить вручную при необходимости).
+  function isAtiCityAllowed(cityText) {
+    if (!cityText) return false;
+    const clean = expandCityAbbr(cityText.split(',')[0].trim()).toLowerCase();
+    return clean.startsWith('москв') || clean.startsWith('санкт-петербург');
+  }
+
+  async function fillAtiCity(idx, cityText, log) {
+    if (!cityText) return;
+    if (!isAtiCityAllowed(cityText)) return;
+    const input = document.querySelector(`#atiCityInput_${idx}`);
+    if (!input) {
+      log(`⚠️ Не нашёл поле "Город для АТИ" (точка ${idx === 0 ? 'A' : idx}) - выберите вручную.`);
+      return;
+    }
+    const cleanCity = cityText.split(',')[0].trim();
+    const needle = cleanCity.toLowerCase();
+    fireMouseSeq(input);
+    await sleep(200);
+    setNativeValue(input, cleanCity);
+    const listboxSelector = `#react-select-atiCityInstance_${idx}-listbox`;
+    const menu = await waitFor(() => document.querySelector(listboxSelector), 3000);
+    if (!menu) {
+      log(`⚠️ "Город для АТИ" (точка ${idx === 0 ? 'A' : idx}): нет вариантов для "${cleanCity}" - выберите вручную.`);
+      return;
+    }
+    await waitForStableOptions(listboxSelector);
+    let opts = Array.from(document.querySelectorAll(`[id^="react-select-atiCityInstance_${idx}-option-"]`));
+    if (!opts.length) {
+      // Список иногда дозагружается с задержкой больше обычной (несколько
+      // полей АТИ подряд под нагрузкой) - даём ещё один шанс перед тем, как
+      // сдаться и попросить заполнить вручную.
+      await sleep(500);
+      await waitForStableOptions(listboxSelector);
+      opts = Array.from(document.querySelectorAll(`[id^="react-select-atiCityInstance_${idx}-option-"]`));
+    }
+    let target = opts.find(o => o.textContent.split(',')[0].trim().toLowerCase() === needle);
+    if (!target) target = opts.find(o => o.textContent.trim().toLowerCase().startsWith(needle));
+    if (!target) {
+      const matches = opts.filter(o => o.textContent.trim().toLowerCase().includes(needle));
+      target = matches.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length)[0];
+    }
+    if (!target) {
+      log(`⚠️ "Город для АТИ" (точка ${idx === 0 ? 'A' : idx}): не нашёл "${cleanCity}" в списке - выберите вручную.`);
+      return;
+    }
+    fireMouseSeq(target);
+    await sleep(200);
+  }
+
+  // rangeTo (необязательный) - готовая строка "дд.мм.гггг чч:мм" для ВТОРОЙ
+  // даты периода прибытия ("Дата въезда, до"), если для этой точки маршрута
+  // нужно указать ИНТЕРВАЛ, а не одну дату (см. loadingDateWindowTo выше и
+  // findArrivalPeriodCheckbox). Используется пока только для точки погрузки
+  // (planEnterTime0) - вызовы для точек выгрузки её не передают и ведут себя
+  // ровно как раньше.
+  async function setDateTime(inputName, dateStr, timeStr, log, rangeTo) {
+    const el = document.querySelector(`input[name="${inputName}"]`);
+    if (!el) { log(`Не нашёл поле даты ${inputName}`); return false; }
+    el.click();
+    await sleep(200);
+    setNativeValue(el, `${dateStr} ${timeStr}`);
+    await sleep(200);
+    if (rangeTo) {
+      // Галочку нужно найти и отметить, пока календарь ещё открыт (её подвал
+      // существует в DOM только в этот момент - см. findArrivalPeriodCheckbox) -
+      // поэтому делаем это ДО el.blur() ниже.
+      const checkbox = findArrivalPeriodCheckbox();
+      if (checkbox) {
+        if (!checkbox.checked) {
+          fireMouseSeq(checkbox);
+          await sleep(250);
+        }
+      } else {
+        log(`⚠️ Не нашёл галочку "Выбрать период прибытия" для поля ${inputName} - в сообщении указано окно для погрузки (${dateStr} - ${rangeTo.split(' ')[0]}), но интервал на сайте придётся включить вручную.`);
+      }
+    }
+    el.blur();
+    await sleep(150);
+    if (rangeTo) {
+      const maxInputName = `max${inputName.charAt(0).toUpperCase()}${inputName.slice(1)}`;
+      const toEl = document.querySelector(`input[name="${maxInputName}"]`);
+      if (!toEl) {
+        log(`⚠️ Не нашёл поле "Дата въезда, до" (${maxInputName}) - заполните вторую дату периода вручную.`);
+        return true;
+      }
+      setNativeValue(toEl, rangeTo);
+      await sleep(200);
+      toEl.blur();
+    }
+    return true;
+  }
+
+  // Добавляет ещё одну точку маршрута (кнопка "Добавить точку") - нужно для
+  // маршрутов с несколькими точками выгрузки ("Ижевск - Нытва - Пермь").
+  // Новая точка по умолчанию иногда становится "Точкой загрузки", а иногда
+  // (в зависимости от предыдущей точки) сразу "Точкой выгрузки" - поэтому
+  // всегда проверяем реальный подписанный тип и переключаем при необходимости.
+  // Возвращает индекс новых полей location{N}/planEnterTime{N}, либо null при ошибке.
+  async function addDropPoint(log) {
+    const addBtn = document.querySelector('button[name="addPoint"]');
+    if (!addBtn) { log('Не нашёл кнопку "Добавить точку" - добавьте точку маршрута вручную.'); return null; }
+    const before = document.querySelectorAll('input[name^="location"]').length;
+    fireMouseSeq(addBtn);
+    const appeared = await waitFor(() => document.querySelectorAll('input[name^="location"]').length > before);
+    if (!appeared) { log('Не удалось добавить новую точку маршрута.'); return null; }
+    await sleep(250);
+    const idx = before; // индекс только что созданного поля location{idx}
+    const titles = document.querySelectorAll('.order-form__point-title');
+    const lastTitle = titles[titles.length - 1];
+    if (lastTitle && !/выгрузки/i.test(lastTitle.textContent)) {
+      const editLink = lastTitle.querySelector('.edit-point-type .text-link');
+      if (editLink) {
+        fireMouseSeq(editLink);
+        await sleep(250);
+        const listItem = await waitFor(() => document.querySelector('.edit-point-type__list-item'));
+        if (listItem) {
+          fireMouseSeq(listItem);
+          await sleep(250);
+        }
+      }
+    }
+    return idx;
+  }
+
+  // Список вариантов в выпадающем списке иногда дозагружается/дофильтровывается
+  // асинхронно (debounce поиска на сайте) уже ПОСЛЕ того, как сам контейнер
+  // меню появился в DOM. Если считать варианты сразу, можно поймать неполный
+  // промежуточный список (например, без нужного "Рефрижератор", но уже с
+  // "Рефрижератор 10 тонн") - тогда точное совпадение не находится, включается
+  // запасной вариант по подстроке, и он хватает первый попавшийся похожий пункт.
+  // Поэтому ждём, пока список вариантов перестанет меняться между двумя
+  // соседними проверками, и только потом ищем нужный пункт.
+  async function waitForStableOptions(menuSelector, checks = 4, interval = 150) {
+    let prev = null;
+    for (let i = 0; i < checks; i++) {
+      const menu = document.querySelector(menuSelector);
+      const cur = menu ? Array.from(menu.querySelectorAll('[class*="-option"]')).map(o => o.textContent.trim()) : [];
+      if (prev !== null && cur.length === prev.length && cur.every((t, idx) => t === prev[idx])) {
+        return { menu, opts: cur };
+      }
+      prev = cur;
+      await sleep(interval);
+    }
+    const menu = document.querySelector(menuSelector);
+    const cur = menu ? Array.from(menu.querySelectorAll('[class*="-option"]')).map(o => o.textContent.trim()) : [];
+    return { menu, opts: cur };
+  }
+
+  async function pickReactSelectOption(inputEl, optionText, { exact = true, typeSearch = true } = {}) {
+    if (!inputEl) return false;
+    fireMouseSeq(inputEl);
+    await sleep(250);
+    if (typeSearch) { setNativeValue(inputEl, optionText); await sleep(350); }
+    const menu = await waitFor(() => document.querySelector('[class*="-menu"]'), 2000);
+    if (!menu) return false;
+    // Дожидаемся, пока список вариантов стабилизируется (см. комментарий выше),
+    // и работаем с "живыми" DOM-узлами, а не с ранее сохранённым снимком.
+    await waitForStableOptions('[class*="-menu"]');
+    const opts = Array.from(document.querySelectorAll('[class*="-menu"] [class*="-option"]'));
+    const needle = optionText.trim().toLowerCase();
+    let target;
+    if (exact) {
+      target = opts.find(o => o.textContent.trim().toLowerCase() === needle);
+    } else {
+      // Среди вариантов, содержащих искомое слово как подстроку, берём САМЫЙ
+      // КОРОТКИЙ по тексту - это, как правило, "обычный"/родовой вариант
+      // (например, "Рефрижератор"), а не более специфичный подвид с уточнением
+      // ("Рефрижератор 10 тонн", "Рефрижератор (86 м3)"), который тоже
+      // содержит искомое слово, но не то, что нужно.
+      const matches = opts.filter(o => o.textContent.trim().toLowerCase().includes(needle));
+      target = matches.sort((a, b) => a.textContent.trim().length - b.textContent.trim().length)[0];
+    }
+    if (!target) return false;
+    target.click();
+    await sleep(200);
+    return true;
+  }
+
+  // "Тип груза" раньше был свободным текстовым полем (customCargoType) - сайт
+  // поменял разметку, теперь это закрытый список (обычный react-select, id
+  // "cargoTypeIdInput" - тот же механизм, что у "Типы прицепов"/"Заказчик" и
+  // т.п., см. pickReactSelectOption). Пробуем найти ТОЧНОЕ совпадение с
+  // распознанным типом груза; если такого варианта нет в списке на сайте
+  // (список закрытый, произвольный текст туда больше не впишешь) -
+  // подставляем "ТНП" (проверено - есть в списке всегда) и явно предупреждаем
+  // в логе, чтобы логист проверил и поправил вручную, если точный тип груза
+  // из сообщения важен. Вынесено в отдельную функцию для юнит-тестирования.
+  async function selectCargoType(wantedCargoType, log) {
+    wantedCargoType = (wantedCargoType || '').trim();
+    const cargoTypeInput = document.querySelector('#cargoTypeIdInput');
+    if (!cargoTypeInput) {
+      log('⚠️ Не нашёл поле "Тип груза" (cargoTypeIdInput) в разделе "Груз" - похоже, сайт снова изменил разметку. Выберите тип груза вручную.');
+      return;
+    }
+    let cargoTypeOk = wantedCargoType ? await pickReactSelectOption(cargoTypeInput, wantedCargoType, { exact: true, typeSearch: true }) : false;
+    if (!cargoTypeOk) {
+      // Предупреждаем про "не найден в списке" только если действительно БЫЛ
+      // какой-то распознанный тип груза, который не совпал ни с одним
+      // вариантом на сайте (кроме случая, когда это и есть сам "ТНП" - тогда
+      // предупреждать не о чем). Если тип груза вообще не был распознан
+      // (пустая строка), это не "не найден" - это норма, ниже просто тихо
+      // подставляется вариант по умолчанию.
+      if (wantedCargoType && wantedCargoType.toLowerCase() !== 'тнп') {
+        log(`⚠️ Тип груза "${wantedCargoType}" не найден в списке на сайте - выбрано значение по умолчанию "ТНП", проверьте и поправьте вручную, если нужен другой тип.`);
+      }
+      cargoTypeOk = await pickReactSelectOption(cargoTypeInput, 'ТНП', { exact: true, typeSearch: true });
+    }
+    if (!cargoTypeOk) log('⚠️ Не удалось выбрать "Тип груза" на сайте - выберите вручную.');
+  }
+
+  function scrollToSection(label) {
+    const pill = Array.from(document.querySelectorAll('button,div')).find(e => e.textContent.trim() === label && e.children.length === 0);
+    if (pill) pill.click();
+  }
+
+  // "Отображение заказа" (вкладка "Другое") по умолчанию на сайте иногда стоит
+  // "Всем перевозчикам" - обычно логисту нужно "Выбранным перевозчикам" со
+  // своей же компанией (ООО "Автолайф") в списке, чтобы заказ не улетал сразу
+  // всем на бирже. Сайт часто сам подставляет свою компанию, как только
+  // выбран этот режим, - на этот случай просто проверяем результат и
+  // добавляем компанию вручную, только если её там нет.
+  //
+  // Исключение (по просьбе Ramil) - если логист поставил галочку
+  // "Синхронизировать с АТИ" (см. wantSync/data.wantSync ниже), заказ и так
+  // уходит на внешнюю биржу АТИ.SU, поэтому ограничивать его показ только
+  // своей компанией внутри CargoRun бессмысленно - в этом случае выставляем
+  // "Всем перевозчикам" вместо обычного "Выбранным перевозчикам".
+  const ORDER_VISIBILITY_OPTION = 'Выбранным перевозчикам';
+  const ORDER_VISIBILITY_ALL_OPTION = 'Всем перевозчикам';
+  const OWN_CARRIER_NAME = 'Автолайф';
+
+  // Ключ в sessionStorage для списка заказов, распознанных YandexGPT за один
+  // раз (когда в сообщении несколько маршрутов/заказов) - см. openModal().
+  // sessionStorage выбран специально: он живёт, пока открыта вкладка браузера
+  // (переживает и перезагрузку страницы, и переход сайтом на другую страницу
+  // после сохранения заказа), но не путается между разными вкладками и сам
+  // очищается, когда вкладка закрыта - то есть не нужно ничего чистить вручную.
+  const AI_ORDERS_STORAGE_KEY = 'alobAiOrdersState';
+
+  // Короткий список типов прицепа в окне скрипта (не весь справочник сайта, а
+  // только то, что логист реально использует) - логист сам ставит галочки
+  // перед заполнением, можно отметить сразу несколько. siteText - буквальный
+  // текст варианта в поле "Типы прицепов" на сайте (важно совпадение символ
+  // в символ). Если в сообщении явно распознан тип(ы) прицепа из этого же
+  // списка (см. TRAILER_TYPE_TO_CHECKBOX ниже) - галочки переставляются на
+  // них автоматически (может быть сразу несколько, если типы перечислены
+  // через запятую), иначе остаётся отмеченным вариант по умолчанию.
+  const TRAILER_CHECKBOX_OPTIONS = [
+    { label: 'Тент 110 м3', siteText: 'Тент (110 м3)', default: true },
+    // Название в окне скрипта - "Тент 92м3" (Ramil: "на форме замени название
+    // Тент на Тент 92м3"), а siteText - буквальный текст на сайте - НЕ меняем,
+    // он по-прежнему просто "Тент" (Ramil: "на сайте подставляем так же
+    // просто Тент").
+    { label: 'Тент 92м3', siteText: 'Тент' },
+    { label: 'Рефрижератор 86 м3', siteText: 'Рефрижератор (86 м3)' },
+    { label: 'Изотерм', siteText: 'Изотерм' },
+  ];
+  const DEFAULT_TRAILER_SITE_TEXT = TRAILER_CHECKBOX_OPTIONS.find(o => o.default).siteText;
+  // Соответствие типа, который распознаёт extractTrailer() из текста
+  // сообщения (см. TRAILER_ALIASES выше), варианту из короткого списка выше.
+  // "Тент" ведёт на вариант по умолчанию (110 м3) - если он назван в
+  // сообщении САМ ПО СЕБЕ, это просто оставляет вариант по умолчанию
+  // отмеченным (без видимой разницы), а если назван В ПЕРЕЧИСЛЕНИИ с другими
+  // типами ("реф, тент, изотерм") - галочка на нём тоже ставится, а не
+  // теряется.
+  const TRAILER_TYPE_TO_CHECKBOX = {
+    'тент': DEFAULT_TRAILER_SITE_TEXT,
+    'рефрижератор': 'Рефрижератор (86 м3)',
+    'изотермический': 'Изотерм',
+    // "термос" - то же самое, что и изотерм (см. TRAILER_ALIASES) - запасная
+    // запись на случай, если ИИ-разбор вернёт именно слово "термос" как есть,
+    // не нормализовав его в "изотермический" самостоятельно.
+    'термос': 'Изотерм',
+  };
+
+  // Тип загрузки - галочки в окне скрипта, ВЗАИМОИСКЛЮЧАЮЩИЕ (можно отметить
+  // только одну за раз, в отличие от типа прицепа выше) - логист ставит ту,
+  // которая нужна для конкретного заказа, "Задняя" отмечена по умолчанию.
+  // siteText - буквальный текст варианта в поле "Выберите тип загрузки" (поле
+  // #loadUnloadTypeIdInput_0) на сайте, ТОЛЬКО в первой точке маршрута
+  // (точка погрузки) - проверено прямым просмотром DOM настоящего сайта.
+  const LOADING_TYPE_CHECKBOX_OPTIONS = [
+    { label: 'Задняя', siteText: 'Задняя', default: true },
+    { label: 'Боковая', siteText: 'Боковая' },
+    { label: 'Верхняя', siteText: 'Верхняя' },
+    { label: 'Полная растентовка', siteText: 'Полная растентовка' },
+  ];
+  const DEFAULT_LOADING_TYPE_SITE_TEXT = LOADING_TYPE_CHECKBOX_OPTIONS.find(o => o.default).siteText;
+  // Если отмечен тип прицепа "Рефрижератор" или "Изотерм" - тип загрузки
+  // может быть только "Задняя" (так крепится/перевозится груз в этих
+  // прицепах) - см. applyTrailerRestrictionToLoadingType() в openModal().
+  const RESTRICTED_TRAILER_SITE_TEXTS = ['Рефрижератор (86 м3)', 'Изотерм'];
+  async function setOrderVisibilityToOwnCarrier(log) {
+    const accessInput = document.querySelector('#accessTypeInput');
+    if (!accessInput) {
+      log('⚠️ Не нашёл поле "Отображение заказа" - выберите вручную "Выбранным перевозчикам" и добавьте ООО "Автолайф".');
+      return;
+    }
+    const accessContainer = document.querySelector('#accessTypeContainer');
+    const alreadySelected = accessContainer && accessContainer.textContent.includes(ORDER_VISIBILITY_OPTION);
+    if (!alreadySelected) {
+      openReactSelect(accessInput);
+      const opt = await waitFor(() => {
+        const opts = Array.from(document.querySelectorAll('[id^="react-select-accessTypeInstance-option-"]'));
+        return opts.find(o => o.textContent.trim() === ORDER_VISIBILITY_OPTION);
+      }, 3000);
+      if (!opt) {
+        log('⚠️ Не нашёл вариант "Выбранным перевозчикам" в поле "Отображение заказа" - выберите вручную.');
+        return;
+      }
+      fireMouseSeq(opt);
+      await sleep(300);
+    }
+    const carrierContainer = await waitFor(() => document.querySelector('#visibleForOrganizationsIdsContainer'), 2000);
+    if (!carrierContainer) {
+      log('⚠️ Не появилось поле "Перевозчики" - добавьте ООО "Автолайф" вручную.');
+      return;
+    }
+    if (carrierContainer.textContent.includes(OWN_CARRIER_NAME)) return; // сайт уже подставил сам
+    const carrierInput = document.querySelector('#visibleForOrganizationsIdsInput');
+    if (!carrierInput) {
+      log('⚠️ Не нашёл поле "Перевозчики" - добавьте ООО "Автолайф" вручную.');
+      return;
+    }
+    openReactSelect(carrierInput);
+    await sleep(200);
+    setNativeValue(carrierInput, OWN_CARRIER_NAME);
+    const carrierOpt = await waitFor(() => {
+      const opts = Array.from(document.querySelectorAll('[id^="react-select-visibleForOrganizationsIdsInstance-option-"]'));
+      return opts.find(o => o.textContent.includes(OWN_CARRIER_NAME));
+    }, 3000);
+    if (!carrierOpt) {
+      log('⚠️ Не нашёл ООО "Автолайф" в списке перевозчиков - добавьте вручную.');
+      return;
+    }
+    fireMouseSeq(carrierOpt);
+    await sleep(200);
+  }
+
+  // Вариант "Всем перевозчикам" - используется ВМЕСТО setOrderVisibilityToOwnCarrier
+  // выше, когда стоит галочка "Синхронизировать с АТИ" (см. комментарий у
+  // ORDER_VISIBILITY_ALL_OPTION). Поле "Перевозчики" в этом режиме на сайте не
+  // появляется вообще (ограничивать список не нужно), поэтому здесь только
+  // переключение самого варианта в "Отображение заказа" - без второго шага.
+  async function setOrderVisibilityToAllCarriers(log) {
+    const accessInput = document.querySelector('#accessTypeInput');
+    if (!accessInput) {
+      log('⚠️ Не нашёл поле "Отображение заказа" - выберите вручную "Всем перевозчикам".');
+      return;
+    }
+    const accessContainer = document.querySelector('#accessTypeContainer');
+    if (accessContainer && accessContainer.textContent.includes(ORDER_VISIBILITY_ALL_OPTION)) return; // уже стоит
+    openReactSelect(accessInput);
+    const opt = await waitFor(() => {
+      const opts = Array.from(document.querySelectorAll('[id^="react-select-accessTypeInstance-option-"]'));
+      return opts.find(o => o.textContent.trim() === ORDER_VISIBILITY_ALL_OPTION);
+    }, 3000);
+    if (!opt) {
+      log('⚠️ Не нашёл вариант "Всем перевозчикам" в поле "Отображение заказа" - выберите вручную.');
+      return;
+    }
+    fireMouseSeq(opt);
+    await sleep(300);
+  }
+
+  // Время прибытия в точку выгрузки - считаем по тому же перегону и тем же
+  // 700 км/сутки (settings.dailyRangeKm), что и дату, а НЕ просто копируем
+  // время погрузки. Ramil: "Даже если 1 точка то время не надо ставить равным
+  // погрузке, рассчитывай исходя из 700км в сутки, но если время по часовому
+  // поясу рассчитывается на после 19-00, то ставь 8-00 следующего дня" (ночью
+  // машину на разгрузке никто не ждёт - в этом случае и дата сдвигается на
+  // следующий день, ПОМИМО уже посчитанной даты по дистанции). "После 19-00"
+  // трактуем включительно (19:00 и позже) - самое частое деловое значение
+  // этой фразы; если Ramil имел в виду строго "20:00 и позже" - поправить
+  // сравнение ниже на "> 19" вместо ">= 19" одной правкой.
+  //
+  // Ramil, отдельным уточнением на реальном примере ("Челны-Ижевск завтра в
+  // 18-00" дало 02.10 01:00 вместо ожидаемых 02.10 08:00): "так же надо ещё
+  // учитывать время на ПРР - это 4 часа, т.е. если погрузка в 8-00 то дату и
+  // время выгрузки мы рассчитываем с 12-00". Машина трогается в путь не сразу
+  // в момент прибытия/погрузки, а через settings.loadUnloadHours (по
+  // умолчанию 4ч, см. DEFAULTS_SCHEMA) - на столько же позже сдвигается точка
+  // отсчёта перегона. Кроме того, ЛЮБОЕ расчётное время вне разумного окна
+  // разгрузки (раньше 8 утра - тоже ночь/раннее утро, столь же нереалистично,
+  // как и вечер) выравнивается до 8 утра - в примере выше именно поэтому
+  // результат должен быть 08:00, а не 01:00.
+  //
+  // Часовой пояс точки отправления и точки прибытия учитывается через
+  // estimateUtcOffsetForCity (координаты + tz-lookup, см. выше) - расстояние
+  // само по себе НЕ говорит, в котором часу по МЕСТНОМУ времени приедет
+  // машина, если города в разных часовых поясах.
+  //
+  // Возвращает { timeStr, nextDay } - nextDay=true означает, что из-за
+  // ВЕЧЕРНЕГО времени дата этой точки должна быть на 1 день позже, чем
+  // посчитана расстоянием (это уже отдельно от многодневности самого перегона
+  // - см. computeDropPointDates ниже). Раннее утро (до 8:00) не двигает дату -
+  // время уже относится к нужной (уже посчитанной по расстоянию) дате, просто
+  // выравнивается на начало разумного окна разгрузки этого же дня.
+  async function computeArrivalTime(prevCity, prevTimeStr, currentCity, km, settings) {
+    const tm = /^(\d{1,2}):(\d{2})$/.exec((prevTimeStr || '').trim());
+    const prevHours = tm ? (parseInt(tm[1], 10) + parseInt(tm[2], 10) / 60) : 0;
+    const departureHours = prevHours + settings.loadUnloadHours;
+    const elapsedHours = (km / settings.dailyRangeKm) * 24;
+    const [prevOffset, currOffset] = await Promise.all([
+      estimateUtcOffsetForCity(prevCity),
+      estimateUtcOffsetForCity(currentCity),
+    ]);
+    const tzDiff = (typeof prevOffset === 'number' && typeof currOffset === 'number') ? (currOffset - prevOffset) : 0;
+    const totalHours = departureHours + elapsedHours + tzDiff;
+    const hourOfDay = ((totalHours % 24) + 24) % 24;
+    let roundedHour = Math.ceil(hourOfDay - 1e-9); // округляем вверх до целого часа, без "рваных" минут
+    if (roundedHour >= 24) roundedHour = 0;
+    let nextDay = false;
+    if (roundedHour >= 19) {
+      roundedHour = 8;
+      nextDay = true;
+    } else if (roundedHour < 8) {
+      roundedHour = 8;
+    }
+    return { timeStr: `${pad2(roundedHour)}:00`, nextDay };
+  }
+
+  // Чистый расчёт дат/времени для точек выгрузки (может быть несколько,
+  // например "Ижевск - Нытва - Пермь") - вынесен из fillOrderOnSite()
+  // ОТДЕЛЬНОЙ функцией специально для того, чтобы её можно было проверить
+  // тестом напрямую, без построения фиктивного DOM формы сайта (сама
+  // fillOrderOnSite - это уже долгая DOM-автоматизация настоящего сайта, её
+  // по договорённости отдельно не тестируем - см. комментарий в
+  // test_launch_sync.js).
+  //
+  // Ramil про заказ "Дзержинский - Ерёмино - Ижевск": раньше на ВСЕ точки
+  // выгрузки (и на промежуточную "Ерёмино", и на конечную "Ижевск") ставилась
+  // ОДНА и та же дата/время (dateTo, посчитанная по прямому расстоянию от
+  // погрузки до КОНЕЧНОЙ точки) - неверно, ведь между промежуточной и конечной
+  // точкой ещё отдельный перегон. Правильно (его словами): "сначала оцениваем
+  // Дзержинский-Ерёмино, потом Ерёмино-Ижевск" - то есть каждая СЛЕДУЮЩАЯ
+  // точка маршрута получает дату, посчитанную по расстоянию от ПРЕДЫДУЩЕЙ
+  // точки, а не от точки погрузки напрямую. ВРЕМЯ на каждой точке теперь тоже
+  // считается по расстоянию этого же перегона (см. computeArrivalTime выше),
+  // а не остаётся временем погрузки, как было раньше.
+  //
+  // Дата берётся как раньше (Math.ceil(км/дневная норма) дней от предыдущей
+  // точки, либо уже посчитанная dateTo - для единственной/явно названной
+  // точки выгрузки) - этот расчёт НЕ меняем, чтобы не разойтись с уже
+  // показанным логисту полем "Дата выгрузки" в окне заявки; вечерний перенос
+  // времени (см. выше) может добавить к этой дате ЕЩЁ 1 день сверху.
+  //
+  // Возвращает массив [{ city, dateStr, timeStr }, ...] - по одному элементу
+  // на каждую точку выгрузки, в том же порядке, что и dropPoints =
+  // [...extraStops, to].
+  async function computeDropPointDates(data, settings, log) {
+    const dropPoints = [...(data.extraStops || []), data.to].filter(Boolean);
+    const result = [];
+    if (!dropPoints.length) return result;
+    let prevCity = data.from;
+    let prevDateStr = data.date;
+    let prevTimeStr = data.time;
+    const lastDropIdx = dropPoints.length - 1;
+    for (let i = 0; i < dropPoints.length; i++) {
+      let stopDateStr;
+      let stopTimeStr;
+      if (i === lastDropIdx && data.dateToIsExplicit) {
+        // Дата (и время) выгрузки прямо названы в сообщении - это не оценка
+        // по расстоянию, а прямое указание диспетчера, надёжнее любого
+        // расчёта; не трогаем ни то, ни другое.
+        stopDateStr = data.dateTo || data.date;
+        stopTimeStr = data.time;
+      } else {
+        // Единственная точка выгрузки - dateTo уже посчитана по ЭТОМУ ЖЕ
+        // перегону (from -> to) в окне заявки (computeDateTo), пересчитывать
+        // дату не нужно - но время по этому расстоянию не считалось нигде,
+        // досчитываем его здесь.
+        const useExistingDate = i === lastDropIdx && dropPoints.length === 1;
+        const est = await estimateRouteKm(prevCity, dropPoints[i], settings);
+        if (est.km) {
+          stopDateStr = useExistingDate
+            ? (data.dateTo || data.date)
+            : addDaysToDateStr(prevDateStr, Math.ceil(est.km / settings.dailyRangeKm));
+          const arrival = await computeArrivalTime(prevCity, prevTimeStr, dropPoints[i], est.km, settings);
+          stopTimeStr = arrival.timeStr;
+          if (arrival.nextDay) stopDateStr = addDaysToDateStr(stopDateStr, 1);
+          log(`Дата и время прибытия в точку "${dropPoints[i]}" уточнены по перегону от "${prevCity}": ~${est.km} км → ${stopDateStr} ${stopTimeStr}. Проверьте и поправьте при необходимости.`);
+        } else {
+          stopDateStr = useExistingDate ? (data.dateTo || data.date) : prevDateStr;
+          stopTimeStr = prevTimeStr;
+          log(`⚠️ Не удалось оценить перегон "${prevCity}" → "${dropPoints[i]}"${est.reason ? ' (' + est.reason + ')' : ''} - дата и время на этой точке оставлены как есть, проверьте вручную.`);
+        }
+      }
+      result.push({ city: dropPoints[i], dateStr: stopDateStr, timeStr: stopTimeStr });
+      prevCity = dropPoints[i];
+      prevDateStr = stopDateStr;
+      prevTimeStr = stopTimeStr;
+    }
+    return result;
+  }
+
+  async function fillOrderOnSite(data, settings, log) {
+    log('Открываю форму заказа...');
+    const ok = await openOrderForm(log);
+    if (!ok) return;
+
+    // ---- Основная информация ----
+    scrollToSection('Основная информация');
+    await sleep(200);
+    const trucks = document.querySelector('input[name="trucksCount"]');
+    if (trucks) setNativeValue(trucks, String(data.vehicleCount || 1));
+
+    if (data.clientName) {
+      log(`Ищу заказчика "${data.clientName}"...`);
+      const counterpartyInput = document.querySelector('#counterpartyIdInput');
+      const found = await pickReactSelectOption(counterpartyInput, data.clientName, { exact: false });
+      if (!found) log(`⚠️ Заказчик "${data.clientName}" не найден в справочнике - выберите вручную.`);
+    }
+
+    // ---- Стоимость перевозки ----
+    scrollToSection('Стоимость перевозки');
+    await sleep(200);
+    const orderCost = document.querySelector('input[name="orderCost"]');
+    if (orderCost && data.priceAmount) setNativeValue(orderCost, String(Math.round(data.priceAmount)));
+    const invited = document.querySelector('input[name="invitedFleetPrice"]');
+    if (invited) setNativeValue(invited, String(data.invitedFleetPrice != null ? data.invitedFleetPrice : settings.invitedFleetPrice));
+    if (data.vat === false) {
+      log('Выставляю "Без НДС"...');
+      const ndsInput = document.querySelector('#ndsTypeIdInput');
+      await pickReactSelectOption(ndsInput, 'Без НДС', { exact: true, typeSearch: false });
+    }
+    if (data.priceNegotiable) {
+      log('В сообщении договорная цена/торг - выставляю "Тип цены": Предложения...');
+      const priceTypeInput = document.querySelector('#orderPriceTypeInput');
+      if (priceTypeInput) {
+        openReactSelect(priceTypeInput);
+        const priceTypeOpt = await waitFor(() => {
+          const opts = Array.from(document.querySelectorAll('[id^="react-select-orderPriceTypeInstance-option-"]'));
+          return opts.find(o => o.textContent.trim() === 'Предложения');
+        }, 3000);
+        if (priceTypeOpt) {
+          fireMouseSeq(priceTypeOpt);
+          await sleep(300);
+          log('⚠️ При типе цены "Предложения" на сайте появляется поле "Приём ставок до" - заполните его вручную.');
+        } else {
+          log('⚠️ Не нашёл вариант "Предложения" в поле "Тип цены" - выберите вручную.');
+        }
+      } else {
+        log('⚠️ Не нашёл поле "Тип цены" - выберите вручную "Предложения".');
+      }
+    }
+
+    // ---- Маршрут: точка A ----
+    scrollToSection('Маршрут');
+    await sleep(200);
+    log(`Заполняю точку загрузки: ${data.from}...`);
+    await fillAddress('location0', data.from, log);
+    await setDateTime('planEnterTime0', data.date, data.time, log, data.dateWindowTo ? `${data.dateWindowTo} ${ARRIVAL_PERIOD_END_TIME}` : null);
+    await fillAtiCity(0, data.from, log);
+
+    // Тип загрузки (см. LOADING_TYPE_CHECKBOX_OPTIONS выше) - ставится ТОЛЬКО
+    // в первой точке маршрута (точке погрузки), поле #loadUnloadTypeIdInput_0
+    // - на точках выгрузки это поле не трогаем (так попросил логист). Если
+    // отмечен Реф/Изотерм - здесь уже гарантированно "Задняя" (см.
+    // applyTrailerRestrictionToLoadingType() в окне скрипта), отдельно
+    // перепроверять тип прицепа тут не нужно.
+    const loadingTypeWanted = data.loadingType || DEFAULT_LOADING_TYPE_SITE_TEXT;
+    const loadUnloadInput0 = document.querySelector('#loadUnloadTypeIdInput_0');
+    const loadingTypeOk = await pickReactSelectOption(loadUnloadInput0, loadingTypeWanted, { exact: true, typeSearch: true });
+    if (!loadingTypeOk) log(`⚠️ Тип загрузки "${loadingTypeWanted}" не найден в поле "Выберите тип загрузки" на точке погрузки - выберите вручную.`);
+
+    // ---- Маршрут: точки выгрузки (может быть несколько, например
+    // "Ижевск - Нытва - Пермь" - Нытва и Пермь заполняются по очереди) ----
+    // Дата и время каждой точки считаются СЛЕДУЮЩИМ перегоном от предыдущей
+    // точки (см. computeDropPointDates/computeArrivalTime выше и комментарии
+    // там же) - не одним прыжком от точки погрузки сразу до конечной, и не
+    // временем погрузки на всех точках подряд.
+    const dropPoints = [...(data.extraStops || []), data.to].filter(Boolean);
+    if (dropPoints.length) {
+      const dropDates = await computeDropPointDates(data, settings, log);
+      for (let i = 0; i < dropPoints.length; i++) {
+        let idx = i + 1; // точка location1 уже есть на форме по умолчанию
+        if (i > 0) {
+          log(`Добавляю точку маршрута для "${dropPoints[i]}"...`);
+          const newIdx = await addDropPoint(log);
+          if (newIdx === null) {
+            log(`⚠️ Не удалось создать точку для "${dropPoints[i]}" - добавьте вручную.`);
+            continue;
+          }
+          idx = newIdx;
+        }
+        log(`Заполняю точку выгрузки: ${dropPoints[i]}...`);
+        await fillAddress(`location${idx}`, dropPoints[i], log);
+        await setDateTime(`planEnterTime${idx}`, dropDates[i].dateStr, dropDates[i].timeStr, log);
+        await fillAtiCity(idx, dropPoints[i], log);
+      }
+    } else {
+      log('⚠️ Не распознал город выгрузки - заполните точку B вручную.');
+    }
+
+    // ---- Груз ----
+    scrollToSection('Груз');
+    await sleep(200);
+    await selectCargoType(data.cargoType || settings.cargoType, log);
+    const cargoWeight = document.querySelector('input[name="cargoWeight"]');
+    if (cargoWeight) setNativeValue(cargoWeight, String(data.weight || settings.cargoWeight));
+    else log('⚠️ Не нашёл поле "Вес груза" (cargoWeight) в разделе "Груз".');
+    const cargoCost = document.querySelector('input[name="cargoCost"]');
+    if (cargoCost) setNativeValue(cargoCost, String(settings.cargoCost));
+    else log('⚠️ Не нашёл поле "Стоимость груза" (cargoCost) в разделе "Груз".');
+
+    // ---- Условия перевозки ----
+    scrollToSection('Условия перевозки');
+    await sleep(200);
+    const trailerInput = document.querySelector('#trailerTypeIdsInput');
+    const trailerTypesWanted = (data.trailerTypes && data.trailerTypes.length) ? data.trailerTypes : [DEFAULT_TRAILER_SITE_TEXT];
+    for (const siteText of trailerTypesWanted) {
+      // Тексты вариантов - буквально скопированы с сайта (см. TRAILER_CHECKBOX_OPTIONS),
+      // поэтому ищем точное совпадение; запасной вариант по подстроке не нужен.
+      const ok = await pickReactSelectOption(trailerInput, siteText, { exact: true, typeSearch: true });
+      if (!ok) log(`⚠️ Тип прицепа "${siteText}" не найден в списке на сайте - выберите вручную.`);
+    }
+
+    // ---- Другое ----
+    scrollToSection('Другое');
+    await sleep(200);
+    const contactName = data.contactName || settings.contactName;
+    const contactPhone = data.contactPhone || settings.contactPhone;
+    const nameInput = document.querySelector('input[name="contactPersonName"]');
+    if (nameInput && contactName) setNativeValue(nameInput, contactName);
+    const phoneInput = document.querySelector('input[name="contactPersonPhoneNumber"]');
+    if (phoneInput && contactPhone) setNativeValue(phoneInput, contactPhone);
+    if (!contactName || !contactPhone) {
+      log('⚠️ Контактное лицо/телефон не заполнены на сайте - поля были пустыми в форме заявки. Заполните их вручную на сайте и/или впишите в окно скрипта.');
+    }
+    const comment = document.querySelector('textarea[name="comment"]');
+    if (comment) setNativeValue(comment, `Исходное сообщение:\n${redactPriceFromComment(data.raw)}`);
+
+    if (data.wantSync) {
+      log('Выставляю "Отображение заказа": Всем перевозчикам (стоит галочка "Синхронизировать с АТИ")...');
+      await setOrderVisibilityToAllCarriers(log);
+    } else {
+      log('Выставляю "Отображение заказа": Выбранным перевозчикам (ООО "Автолайф")...');
+      await setOrderVisibilityToOwnCarrier(log);
+    }
+
+    if (data.vehicleCount > 1) {
+      log('✅ Готово. При количестве ТС больше 1 сайт не позволяет нажать «Запустить в работу» одним кликом - проверьте поля и нажмите «Сохранить черновик».');
+    } else {
+      log('✅ Готово. Проверьте поля на сайте и нажмите «Запустить в работу» или «Сохранить черновик».');
+    }
+  }
+
+  // ---- Необратимые действия после заполнения формы (по явной галочке +
+  // подтверждению, см. fillBtn.onclick ниже) -----------------------------
+  // Нажимает кнопку «Запустить в работу» на форме заказа. Настоящий клик по
+  // реальной кнопке сайта - вызывается ТОЛЬКО если логист сам поставил
+  // галочку "Запустить в работу" в окне заявки И подтвердил действие в
+  // окне подтверждения браузера (window.confirm) прямо перед заполнением.
+  async function clickLaunchIntoWork(log) {
+    log('Нажимаю «Запустить в работу»...');
+    const btn = await waitFor(() =>
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Запустить в работу'));
+    if (!btn) { log('⚠️ Не нашёл кнопку «Запустить в работу» на странице - нажмите её вручную.'); return false; }
+    btn.click();
+    await sleep(500);
+    log('✅ «Запустить в работу» нажато.');
+    return true;
+  }
+
+  // Нажимает кнопку «Синхронизировать» (синхронизация заказа с АТИ - см.
+  // скриншот-образец от Ramil). Эта кнопка появляется в шапке УЖЕ СОЗДАННОГО
+  // заказа, поэтому имеет смысл вызывать эту функцию только после успешного
+  // clickLaunchIntoWork выше - ждём подольше (страница могла ещё переключиться
+  // на карточку созданного заказа).
+  async function clickSyncWithAti(log) {
+    log('Нажимаю «Синхронизировать» (АТИ)...');
+    const btn = await waitFor(() =>
+      Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Синхронизировать'), 8000);
+    if (!btn) { log('⚠️ Не нашёл кнопку «Синхронизировать» - нажмите её вручную на странице заказа.'); return false; }
+    btn.click();
+    await sleep(500);
+    log('✅ «Синхронизировать» с АТИ нажато.');
+    return true;
+  }
+
+  /* =========================================================================
+   *  3. ИНТЕРФЕЙС (плавающая кнопка + модалка)
+   * ========================================================================= */
+  const STYLE = `
+    #alob-fab { position: fixed; right: 24px; bottom: 24px; z-index: 999999;
+      background: #ff9900; color: #1a1a1a; border: none; border-radius: 999px;
+      width: 56px; height: 56px; font-size: 24px; cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0,0,0,.3); }
+    #alob-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 999998;
+      display: flex; align-items: flex-start; justify-content: center; overflow: auto; padding: 40px 16px; }
+    #alob-modal { background: #fff; width: 640px; max-width: 100%; border-radius: 10px; padding: 20px;
+      font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #222; }
+    #alob-modal h2 { margin: 0 0 12px; font-size: 18px; }
+    #alob-modal textarea { width: 100%; box-sizing: border-box; min-height: 110px; padding: 8px;
+      font-family: inherit; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }
+    #alob-modal .alob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin-top: 12px; }
+    #alob-modal label { font-size: 12px; color: #555; display: block; margin-bottom: 2px; }
+    #alob-modal input, #alob-modal select { width: 100%; box-sizing: border-box; padding: 6px 8px;
+      border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+    #alob-modal .alob-actions { margin-top: 16px; display: flex; gap: 8px; justify-content: flex-end; }
+    #alob-modal button.alob-btn { padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer; font-size: 14px; }
+    #alob-modal button.alob-primary { background: #ff9900; color: #1a1a1a; font-weight: 600; }
+    #alob-modal button.alob-secondary { background: #eee; color: #333; }
+    #alob-modal .alob-log { margin-top: 12px; font-size: 12px; color: #555; white-space: pre-wrap;
+      max-height: 120px; overflow: auto; background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px; }
+    #alob-modal .alob-close { position: absolute; top: 14px; right: 16px; cursor: pointer; font-size: 18px; color: #888; }
+    #alob-modal { position: relative; }
+  `;
+
+  function injectStyle() {
+    const s = document.createElement('style');
+    s.textContent = STYLE;
+    document.head.appendChild(s);
+  }
+
+  function el(tag, attrs = {}, children = []) {
+    const e = document.createElement(tag);
+    Object.entries(attrs).forEach(([k, v]) => {
+      if (k === 'text') e.textContent = v;
+      else e.setAttribute(k, v);
+    });
+    children.forEach(c => e.appendChild(c));
+    return e;
+  }
+
+  function openModal() {
+    const settings = getSettings();
+    const overlay = el('div', { id: 'alob-overlay' });
+    const modal = el('div', { id: 'alob-modal' });
+    const close = el('span', { class: 'alob-close', text: '✕' });
+    close.onclick = () => overlay.remove();
+
+    const title = el('h2', { text: 'Заявка из сообщения → заказ на CargoRun' });
+    const hint = el('div', { style: 'font-size:12px;color:#777;margin-bottom:6px' , text: 'Вставьте сообщение логиста как есть (можно с переносами строк):'});
+    const textarea = el('textarea', { placeholder: 'Ижевск-Чебаркуль\n100тр\nПогрузка сегодня\n1 ТС' });
+
+    const parseBtn = el('button', { class: 'alob-btn alob-secondary', text: 'Распознать' });
+    const aiBtn = el('button', { class: 'alob-btn alob-secondary', text: '🤖 Распознать через ИИ' });
+    const fillBtn = el('button', { class: 'alob-btn alob-primary', text: 'Заполнить на сайте', disabled: 'true' });
+    fillBtn.style.opacity = 0.5;
+    // "Начать заново" - на случай, если решили завести не все заказы из
+    // сообщения (например, ИИ нашёл 3 маршрута, а нужно оформить только 1) -
+    // очищает и поля формы, и очередь оставшихся ИИ-заказов (см.
+    // AI_ORDERS_STORAGE_KEY), чтобы при следующем открытии окна "забытые"
+    // заказы не всплыли снова.
+    const clearBtn = el('button', { class: 'alob-btn alob-secondary', text: 'Очистить' });
+
+    const grid = el('div', { class: 'alob-grid' });
+    const logBox = el('div', { class: 'alob-log', text: '' });
+
+    function field(labelText, inputAttrs) {
+      const wrap = el('div');
+      wrap.appendChild(el('label', { text: labelText }));
+      const input = el('input', inputAttrs);
+      wrap.appendChild(input);
+      return { wrap, input };
+    }
+
+    // Чекбоксы типа прицепа (см. TRAILER_CHECKBOX_OPTIONS) - вместо текстового
+    // поля, чтобы логист мог просто отметить нужные варианты (можно сразу
+    // несколько), не гадая, как именно называется вариант на сайте.
+    // "Тент 110 м3" (вариант по умолчанию) - ИСКЛЮЧЕНИЕ из "можно несколько":
+    // Ramil: "Тент 110м3 нельзя выбирать с другими типами, т.е. если ставим
+    // галочку на Тент 92м3 то галочка с Тент 110м3 снимается, если обратно
+    // ставим на тент 110м3, то с других снимается". То есть "Тент 110 м3"
+    // несовместим ни с одним другим типом, а ОСТАЛЬНЫЕ типы (Тент 92м3,
+    // Рефрижератор, Изотерм) по-прежнему можно комбинировать МЕЖДУ СОБОЙ как
+    // угодно - ограничение именно на "Тент 110 м3" против всех остальных, а
+    // не полная взаимоисключающая группа, как у "Тип загрузки" ниже. См. также
+    // applyTrailerMutualExclusion() - та же логика, но для случая, когда
+    // галочки переставляются ПРОГРАММНО (авторазбор/ИИ-заказ), а не кликом.
+    function trailerCheckboxField() {
+      const wrap = el('div');
+      wrap.style.gridColumn = '1 / -1';
+      wrap.appendChild(el('label', { text: 'Тип прицепа (можно несколько)' }));
+      const box = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px 16px;padding:4px 0 0;' });
+      const checkboxes = TRAILER_CHECKBOX_OPTIONS.map(opt => {
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = !!opt.default;
+        cb.dataset.siteText = opt.siteText;
+        const lbl = el('label', { style: 'display:inline-flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;' });
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(opt.label));
+        box.appendChild(lbl);
+        cb.addEventListener('change', () => {
+          if (!cb.checked) return;
+          if (opt.default) {
+            checkboxes.forEach(other => { if (other !== cb) other.checked = false; });
+          } else {
+            const defaultCb = checkboxes.find(c => c.dataset.siteText === DEFAULT_TRAILER_SITE_TEXT);
+            if (defaultCb && defaultCb !== cb) defaultCb.checked = false;
+          }
+        });
+        return cb;
+      });
+      wrap.appendChild(box);
+      return { wrap, checkboxes };
+    }
+
+    // Чекбоксы типа загрузки (см. LOADING_TYPE_CHECKBOX_OPTIONS) -
+    // ВЗАИМОИСКЛЮЧАЮЩИЕ (ставим одну галочку - остальные автоматически
+    // снимаются), в отличие от типа прицепа выше. "Задняя" отмечена по
+    // умолчанию. Если отмечен тип прицепа Рефрижератор/Изотерм - остальные
+    // варианты блокируются (см. applyTrailerRestrictionToLoadingType ниже).
+    function loadingTypeCheckboxField() {
+      const wrap = el('div');
+      wrap.style.gridColumn = '1 / -1';
+      wrap.appendChild(el('label', { text: 'Тип загрузки' }));
+      const box = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px 16px;padding:4px 0 0;' });
+      const checkboxes = LOADING_TYPE_CHECKBOX_OPTIONS.map(opt => {
+        const cb = el('input', { type: 'checkbox' });
+        cb.checked = !!opt.default;
+        cb.dataset.siteText = opt.siteText;
+        const lbl = el('label', { style: 'display:inline-flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;' });
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(opt.label));
+        box.appendChild(lbl);
+        cb.addEventListener('change', () => {
+          if (cb.checked) {
+            checkboxes.forEach(other => { if (other !== cb) other.checked = false; });
+          } else if (!checkboxes.some(other => other.checked)) {
+            // Нельзя оставить вообще без галочки - если сняли единственную
+            // отмеченную, возвращаем галочку по умолчанию (Задняя).
+            cb.checked = true;
+          }
+        });
+        return cb;
+      });
+      wrap.appendChild(box);
+      return { wrap, checkboxes };
+    }
+
+    // Две галочки необратимых действий на сайте после заполнения формы - ОБЕ
+    // по умолчанию выключены и не запоминаются между открытиями окна (чтобы
+    // случайно не запустить в работу следующий заказ по инерции). Если хотя
+    // бы одна включена - fillBtn.onclick ОБЯЗАТЕЛЬНО спросит подтверждение
+    // (window.confirm) перед тем как вообще что-либо заполнять на сайте -
+    // это последний шанс передумать и снять галочку.
+    function dangerousActionsField() {
+      const wrap = el('div', {
+        style: 'grid-column:1 / -1;margin-top:4px;padding:8px 10px;background:#fff3e0;border:1px solid #ffb74d;border-radius:6px;'
+      });
+      wrap.appendChild(el('div', {
+        style: 'font-size:11px;color:#7a4a00;margin-bottom:6px;',
+        text: 'Необратимые действия на сайте (выключены по умолчанию, потребуют подтверждения):'
+      }));
+      const box = el('div', { style: 'display:flex;flex-wrap:wrap;gap:6px 16px;' });
+      function makeCb(labelText) {
+        const cb = el('input', { type: 'checkbox' });
+        const lbl = el('label', { style: 'display:inline-flex;align-items:center;gap:4px;font-weight:normal;font-size:13px;color:#5a3600;' });
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(labelText));
+        box.appendChild(lbl);
+        return cb;
+      }
+      const launchCb = makeCb('Запустить в работу');
+      const syncCb = makeCb('Синхронизировать с АТИ');
+      wrap.appendChild(box);
+      // Подсказка, почему обе галочки выше вдруг стали неактивны - см.
+      // applyVehicleCountRestrictionToDangerousActions() ниже (Ramil
+      // обнаружил, что на самом сайте при кол-ве ТС больше 1 нет возможности
+      // нажать "Запустить в работу"). Скрыта по умолчанию (кол-во ТС = 1).
+      const vehicleHint = el('div', {
+        style: 'display:none;font-size:11px;color:#b71c1c;margin-top:6px;',
+        text: '⚠️ При количестве ТС больше 1 сайт не позволяет нажать «Запустить в работу» одним кликом - заполните форму и сохраните заказ на сайте как черновик вручную ("Сохранить черновик").'
+      });
+      wrap.appendChild(vehicleHint);
+      return { wrap, launchCb, syncCb, vehicleHint };
+    }
+
+    const fFrom = field('Откуда (город)', { type: 'text' });
+    const fTo = field('Куда (город, конечная точка)', { type: 'text' });
+    const fExtraStops = field('Доп. точки выгрузки (через ;), по пути к конечной', { type: 'text' });
+    const fDate = field('Дата погрузки (дд.мм.гггг)', { type: 'text' });
+    const fDateTo = field('Дата выгрузки (дд.мм.гггг)', { type: 'text' });
+    const fTime = field('Время погрузки (чч:мм)', { type: 'text' });
+    const fPrice = field('Стоимость заказа, руб', { type: 'number' });
+    const fInvitedPrice = field('Ставка перевозчика, руб', { type: 'number' });
+    const fVat = field('НДС (да/нет)', { type: 'text' });
+    const fTrailer = trailerCheckboxField();
+    const fLoadingType = loadingTypeCheckboxField();
+    // Если отмечен тип прицепа Рефрижератор/Изотерм - тип загрузки
+    // ограничивается "Задней" (так попросил логист) - остальные варианты
+    // блокируются и снимаются. Применяем сразу и при каждом изменении
+    // галочек типа прицепа (в т.ч. когда их переставляет авторазбор
+    // сообщения/ИИ-заказ - см. вызовы ниже).
+    function applyTrailerRestrictionToLoadingType() {
+      const restricted = fTrailer.checkboxes.some(cb => cb.checked && RESTRICTED_TRAILER_SITE_TEXTS.includes(cb.dataset.siteText));
+      fLoadingType.checkboxes.forEach(cb => {
+        cb.disabled = restricted && cb.dataset.siteText !== DEFAULT_LOADING_TYPE_SITE_TEXT;
+      });
+      if (restricted) {
+        fLoadingType.checkboxes.forEach(cb => { cb.checked = (cb.dataset.siteText === DEFAULT_LOADING_TYPE_SITE_TEXT); });
+      }
+    }
+    fTrailer.checkboxes.forEach(cb => cb.addEventListener('change', applyTrailerRestrictionToLoadingType));
+    // То же правило "Тент 110 м3" несовместим с другими типами прицепа", что
+    // и в trailerCheckboxField() (там оно уже отрабатывает по клику логиста
+    // через 'change') - но для случая, когда галочки переставляются
+    // ПРОГРАММНО (авторазбор сообщения или применение ИИ-заказа), а не
+    // кликом - обычный 'change' при простой установке cb.checked не
+    // срабатывает. Если после такой автоматической расстановки отмечены И
+    // "Тент 110 м3", И что-то ещё - оставляем более специфичные типы, а
+    // "Тент 110 м3" как запасной вариант по умолчанию снимаем.
+    function applyTrailerMutualExclusion() {
+      const defaultCb = fTrailer.checkboxes.find(c => c.dataset.siteText === DEFAULT_TRAILER_SITE_TEXT);
+      if (!defaultCb || !defaultCb.checked) return;
+      const hasOther = fTrailer.checkboxes.some(c => c !== defaultCb && c.checked);
+      if (hasOther) defaultCb.checked = false;
+    }
+    const fWeight = field('Вес, т', { type: 'number' });
+    const fCargoType = field('Тип груза', { type: 'text' });
+    const fVehicles = field('Кол-во ТС', { type: 'number', value: '1' });
+    const fClient = field('Заказчик (если назван в сообщении)', { type: 'text' });
+    const fContactName = field('Контактное лицо (ФИО)', { type: 'text' });
+    const fContactPhone = field('Телефон контактного лица', { type: 'text' });
+    const fDanger = dangerousActionsField();
+
+    // Ramil обнаружил, что на самом сайте при количестве ТС больше 1 нет
+    // возможности нажать "Запустить в работу" одним кликом (так работает
+    // сайт для группы ТС) - поэтому блокируем обе галочки необратимых
+    // действий здесь же, в окне заявки, вместо того чтобы логист сам
+    // наткнулся на это ограничение уже на сайте. Если галочка была включена
+    // ДО того, как кол-во ТС стало больше 1 - автоматически снимаем её,
+    // чтобы не оставлять "включено, но недоступно". Итоговое действие в
+    // этом случае - обычное "Сохранить черновик" вручную на сайте (см. также
+    // финальное сообщение лога в fillOrderOnSite выше).
+    function applyVehicleCountRestrictionToDangerousActions() {
+      const restricted = (parseInt(fVehicles.input.value, 10) || 1) > 1;
+      fDanger.launchCb.disabled = restricted;
+      fDanger.syncCb.disabled = restricted;
+      if (restricted) {
+        fDanger.launchCb.checked = false;
+        fDanger.syncCb.checked = false;
+      }
+      fDanger.vehicleHint.style.display = restricted ? 'block' : 'none';
+    }
+    fVehicles.input.addEventListener('input', applyVehicleCountRestrictionToDangerousActions);
+    applyVehicleCountRestrictionToDangerousActions();
+
+    [fFrom, fTo, fExtraStops, fDate, fDateTo, fTime, fPrice, fInvitedPrice, fVat, fTrailer, fLoadingType, fWeight, fCargoType, fVehicles, fClient, fContactName, fContactPhone]
+      .forEach(f => grid.appendChild(f.wrap));
+    grid.appendChild(fDanger.wrap);
+
+    // Если в сообщении несколько РАЗНЫХ дат через "и" ("на сб и на вс") - это
+    // несколько отдельных заказов, а не диапазон погрузка/выгрузка одного.
+    // Скрипт не создаёт несколько заказов сам (на сайте это два разных
+    // черновика/заявки) - вместо этого показывает список найденных дат:
+    // логист выбирает дату для ТЕКУЩЕГО заказа, заполняет и сохраняет его на
+    // сайте, потом открывает окно заново на то же сообщение и выбирает
+    // следующую дату для следующего заказа.
+    const multiDateWrap = el('div', {
+      style: 'display:none;margin:8px 0;padding:8px 10px;background:#fff8e1;border:1px solid #ffca28;border-radius:6px;font-size:12px;color:#5a4300;'
+    });
+    const multiDateLabel = el('div', { style: 'margin-bottom:6px;' });
+    const multiDateSelect = el('select', { style: 'width:100%;padding:4px;font-size:13px;' });
+    multiDateWrap.appendChild(multiDateLabel);
+    multiDateWrap.appendChild(multiDateSelect);
+
+    // Если YandexGPT нашёл в сообщении НЕСКОЛЬКО заказов (см. buildAiPrompt) -
+    // список для выбора, какой из них заполнить в форму прямо сейчас
+    // (остальные остаются в списке - логист заполнит и сохранит текущий на
+    // сайте, потом вернётся в это же окно и выберет следующий).
+    const aiOrderWrap = el('div', {
+      style: 'display:none;margin:8px 0;padding:8px 10px;background:#e8f0fe;border:1px solid #4285f4;border-radius:6px;font-size:12px;color:#1a3d7c;'
+    });
+    const aiOrderLabel = el('div', { style: 'margin-bottom:6px;' });
+    const aiOrderSelect = el('select', { style: 'width:100%;padding:4px;font-size:13px;' });
+    aiOrderWrap.appendChild(aiOrderLabel);
+    aiOrderWrap.appendChild(aiOrderSelect);
+
+    let lastParsed = null;
+    let aiOrders = [];
+    let aiOrdersDone = []; // индексы заказов из aiOrders, которые уже заполнены и сохранены на сайте
+    let currentAiIndex = null; // какой из aiOrders сейчас в форме (null - форма заполнена не через ИИ)
+    let pendingDateToCalc = null; // промис расчёта даты выгрузки - fillBtn его дожидается, чтобы не заполнить сайт "сырой" датой
+    let pendingTimeCalc = null; // промис уточнения времени погрузки по часовому поясу - fillBtn тоже его дожидается
+
+    // Сохраняет текущий список ИИ-заказов (сообщение + сами заказы + какие уже
+    // заполнены) в sessionStorage, чтобы при следующем открытии этого окна (даже
+    // после перезагрузки страницы сайтом при сохранении заказа) не нужно было
+    // заново нажимать "Распознать через ИИ" под каждый оставшийся заказ.
+    function saveAiOrdersState() {
+      try {
+        if (!aiOrders.length) { sessionStorage.removeItem(AI_ORDERS_STORAGE_KEY); return; }
+        sessionStorage.setItem(AI_ORDERS_STORAGE_KEY, JSON.stringify({ raw: textarea.value, orders: aiOrders, done: aiOrdersDone }));
+      } catch (e) { /* приватный режим или переполненное хранилище - не критично, просто не сохранится между открытиями окна */ }
+    }
+
+    function renderAiOrderOptions() {
+      aiOrderSelect.innerHTML = '';
+      aiOrders.forEach((o, i) => {
+        const doneMark = aiOrdersDone.includes(i) ? '✓ ' : '';
+        // По просьбе Ramil - короткое название населённого пункта в списке
+        // (полный адрес, особенно когда один и тот же адрес погрузки
+        // повторяется у КАЖДОГО пункта списка, делал список нечитаемым, см.
+        // shortLocationLabel выше). Сам полный адрес никуда не теряется - он
+        // используется при заполнении формы (applyAiOrder) и виден во
+        // всплывающей подсказке варианта (title), если нужно свериться.
+        const shortFrom = shortLocationLabel(o.from) || '?';
+        const shortTo = shortLocationLabel(o.to) || '?';
+        const label = `${doneMark}${i + 1}: ${shortFrom} → ${shortTo}${o.date ? ', ' + o.date : ''}${o.priceAmount ? ', ' + o.priceAmount + ' руб' : ''}`;
+        const opt = el('option', { value: String(i), text: label });
+        if ((o.from && o.from !== shortFrom) || (o.to && o.to !== shortTo)) {
+          opt.title = `${o.from || '?'} → ${o.to || '?'}`;
+        }
+        aiOrderSelect.appendChild(opt);
+      });
+    }
+
+    function log(msg) {
+      logBox.textContent += (logBox.textContent ? '\n' : '') + msg;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    // Пересчитывает дату выгрузки по расстоянию маршрута (пробег в сутки из
+    // настроек, по умолчанию 700 км) для ТЕКУЩЕЙ даты погрузки в поле fDate -
+    // асинхронно, чтобы не тормозить форму. Если в самом сообщении уже названо
+    // расстояние ("7232 км") - берётся оно. Вызывается и при первом разборе
+    // сообщения, и при выборе другой даты в списке "разных заказов" ниже.
+    function recomputeDateTo() {
+      const parsedForDistance = lastParsed;
+      const dateFromNow = fDate.input.value;
+      const calcPromise = computeDateTo(parsedForDistance, dateFromNow, settings).then((res) => {
+        if (lastParsed !== parsedForDistance) return; // логист успел разобрать другое сообщение
+        if (res.source === 'explicit') {
+          fDateTo.input.value = res.dateTo;
+          log(`Дата выгрузки взята прямо из сообщения: ${res.dateTo}.`);
+        } else if (res.km) {
+          fDateTo.input.value = res.dateTo;
+          const label = res.source === 'declared' ? 'по расстоянию из сообщения' : 'по расчётному расстоянию (по прямой ×1.3)';
+          log(`Дата выгрузки уточнена ${label}: ~${res.km} км → ${res.dateTo}. Проверьте и поправьте при необходимости.`);
+        } else {
+          const reasonTxt = res.reason ? ` (${res.reason})` : '';
+          log(`⚠️ Не удалось оценить расстояние маршрута${reasonTxt} - дата выгрузки оставлена равной дате погрузки, проверьте вручную.`);
+        }
+      }).catch(() => {}).then(() => {
+        // Сбрасываем pendingDateToCalc, ТОЛЬКО если это всё ещё тот самый расчёт
+        // (а не более новый, запущенный повторным разбором/выбором другого
+        // заказа) - иначе fillBtn мог бы решить, что ждать больше нечего, пока
+        // на самом деле ещё считается более свежий запрос.
+        if (pendingDateToCalc === calcPromise) pendingDateToCalc = null;
+      });
+      pendingDateToCalc = calcPromise;
+    }
+
+    // Уточняет время погрузки "на сейчас" по РЕАЛЬНОМУ часовому поясу города
+    // погрузки (через координаты - см. estimateUtcOffsetForCity выше), если
+    // погрузка сегодня и время в сообщении не указано явно. Асинхронно, как и
+    // recomputeDateTo выше: пока идёт запрос, в поле остаётся быстрый запасной
+    // вариант (часы этого компьютера +3ч), который pickTime() уже поставил
+    // синхронно. fillBtn дожидается этого расчёта так же, как и даты выгрузки.
+    function recomputeLoadTime(fromCity, dateStr) {
+      const parsedForTime = lastParsed;
+      const calcPromise = estimateUtcOffsetForCity(fromCity).then((offset) => {
+        if (lastParsed !== parsedForTime) return; // логист успел разобрать другое сообщение
+        if (fDate.input.value !== dateStr) return; // логист успел поменять дату погрузки
+        const timeless = { exact: null, before: null, from: null, after: null };
+        const newTime = pickTime({ time: timeless }, settings, dateStr, offset);
+        fTime.input.value = newTime;
+        if (offset === null) {
+          log('⚠️ Погрузка сегодня, время не указано - не смог определить часовой пояс города погрузки (город не нашёлся на карте), время выставлено по часам этого компьютера +3ч. Проверьте вручную.');
+        } else {
+          log(`Погрузка сегодня, время не указано - уточнено по часовому поясу города погрузки: ${newTime}.`);
+        }
+      }).catch(() => {}).then(() => {
+        if (pendingTimeCalc === calcPromise) pendingTimeCalc = null;
+      });
+      pendingTimeCalc = calcPromise;
+    }
+
+    multiDateSelect.onchange = () => {
+      if (!lastParsed) return;
+      fDate.input.value = multiDateSelect.value;
+      fDateTo.input.value = multiDateSelect.value;
+      log(`Выбрана дата для этого заказа: ${multiDateSelect.value}.`);
+      recomputeDateTo();
+    };
+
+    parseBtn.onclick = () => {
+      const text = textarea.value.trim();
+      if (!text) return;
+      currentAiIndex = null; // обычный разбор - это не заказ из списка ИИ
+      lastParsed = parseMessage(text);
+      fFrom.input.value = applyDefaultCityAddress(lastParsed.route?.from || '');
+      fTo.input.value = applyDefaultCityAddress(lastParsed.route?.to || '');
+      fExtraStops.input.value = (lastParsed.route?.extraStops || []).map(applyDefaultCityAddress).join('; ');
+      fDate.input.value = pickDate(lastParsed);
+      fDateTo.input.value = fDate.input.value; // уточнится ниже по расстоянию маршрута
+      const timeWasExplicit = !!(lastParsed.time.exact || lastParsed.time.before || lastParsed.time.from || lastParsed.time.after);
+      const loadIsToday = fDate.input.value === fmtDate(new Date());
+      // Сразу - быстрый запасной вариант (часы этого компьютера +3ч), часовой
+      // пояс города погрузки уточнится асинхронно ниже (recomputeLoadTime).
+      fTime.input.value = pickTime(lastParsed, settings, fDate.input.value, null);
+      fPrice.input.value = lastParsed.price.amount || '';
+      // Ставка перевозчика (сколько получит привлечённый транспорт) - по
+      // умолчанию -10% от цены клиента, округлённые вниз до 1000 руб (см.
+      // computeInvitedFleetPrice). Если цена клиента не распознана - запасной
+      // вариант из настроек. Логист может поправить перед заполнением на сайте.
+      fInvitedPrice.input.value = computeInvitedFleetPrice(lastParsed.price.amount, settings.invitedFleetPrice);
+      fVat.input.value = lastParsed.price.vat === false ? 'нет' : 'да';
+      // Если в сообщении распознан хотя бы один тип прицепа из короткого списка
+      // (TRAILER_TYPE_TO_CHECKBOX) - переставляем галочки на ВСЕ найденные (в
+      // сообщении может быть перечисление через запятую: "реф, тент,
+      // изотерм" - тогда отмечаются все найденные, см. applyTrailerMutual
+      // Exclusion ниже про исключение для "Тент 110 м3"). Если ни один не
+      // распознан - оставляем вариант по умолчанию (Тент 110 м3).
+      {
+        const detectedTypes = lastParsed.trailer.types || [];
+        const mappedSiteTexts = [...new Set(detectedTypes.map(t => TRAILER_TYPE_TO_CHECKBOX[t.toLowerCase()]).filter(Boolean))];
+        const unmapped = detectedTypes.filter(t => !TRAILER_TYPE_TO_CHECKBOX[t.toLowerCase()]);
+        fTrailer.checkboxes.forEach(cb => {
+          cb.checked = mappedSiteTexts.length ? mappedSiteTexts.includes(cb.dataset.siteText) : (cb.dataset.siteText === DEFAULT_TRAILER_SITE_TEXT);
+        });
+        applyTrailerMutualExclusion();
+        applyTrailerRestrictionToLoadingType();
+        if (unmapped.length) {
+          log(`ℹ️ В сообщении есть тип(ы) прицепа, которых нет в быстром списке: ${unmapped.join(', ')} - отметьте нужный вариант вручную в поле "Типы прицепов" на сайте.`);
+        }
+      }
+      fWeight.input.value = lastParsed.weight || settings.cargoWeight;
+      fCargoType.input.value = settings.cargoType;
+      fVehicles.input.value = lastParsed.vehicleCount || 1;
+      applyVehicleCountRestrictionToDangerousActions();
+      fClient.input.value = '';
+      // Контактное лицо/телефон - подставляем то, что запомнено с прошлого раза
+      // (из настроек Tampermonkey или из предыдущей заявки), логист может поправить.
+      fContactName.input.value = settings.contactName || '';
+      fContactPhone.input.value = settings.contactPhone || '';
+      logBox.textContent = '';
+      if (lastParsed.dates.length > 1 && lastParsed.datesAreAlternative) {
+        // Если среди дат есть ОТДЕЛЬНО названная дата выгрузки (см.
+        // hasExplicitDateTo - например "02-03.10 ... 06.10"), в список
+        // "альтернативные даты погрузки" её включать нельзя - это не вариант
+        // дня погрузки, а настоящая дата выгрузки (recomputeDateTo ниже сама
+        // залогирует её отдельно, когда досчитает).
+        const windowDates = hasExplicitDateTo(lastParsed) ? lastParsed.dates.slice(0, -1) : lastParsed.dates;
+        // Ramil попросил использовать настоящий интервал дат на сайте
+        // (galочка "Выбрать период прибытия") вместо того, чтобы гадать одну
+        // "ближайшую" дату - см. loadingDateWindowTo/setDateTime. Сообщаем об
+        // этом в логе вместо прежнего "проверьте поле Дата вручную".
+        log(`ℹ️ В сообщении окно для погрузки: ${windowDates.map(d => d.date).join(' или ')} - при заполнении на сайте будет указан период прибытия (от ${windowDates[0].date} до ${windowDates[windowDates.length - 1].date}), галочка "Выбрать период прибытия" выставится автоматически. Проверьте поле "Дата".`);
+      } else if (lastParsed.dates.length > 1 && lastParsed.datesAreMultiOrder) {
+        log(`⚠️ В сообщении ${lastParsed.dates.length} разных даты (${lastParsed.dates.map(d => d.date).join(', ')}) - похоже, это ОТДЕЛЬНЫЕ заказы на разные дни, а не диапазон погрузка/выгрузка одного заказа. Выберите дату для этого заказа в списке ниже, заполните и сохраните его на сайте, затем откройте окно заново на то же сообщение и выберите следующую дату.`);
+      } else if (lastParsed.dates.length > 1) {
+        log(`Погрузка ${lastParsed.dates[0].date}, выгрузка ${lastParsed.dates[lastParsed.dates.length - 1].date} - взято из сообщения.`);
+      }
+      if (lastParsed.dates.length > 1 && lastParsed.datesAreMultiOrder) {
+        multiDateLabel.textContent = `Разные заказы - выберите дату для ТЕКУЩЕГО заказа (${lastParsed.dates.length}):`;
+        multiDateSelect.innerHTML = '';
+        lastParsed.dates.forEach((d) => {
+          const label = d.raw ? `${d.date} (${d.raw.trim()})` : d.date;
+          multiDateSelect.appendChild(el('option', { value: d.date, text: label }));
+        });
+        multiDateSelect.value = lastParsed.dates[0].date;
+        multiDateWrap.style.display = 'block';
+      } else {
+        multiDateWrap.style.display = 'none';
+        multiDateSelect.innerHTML = '';
+      }
+      if (lastParsed.route?.guess) log('⚠️ Маршрут распознан неуверенно - проверьте города.');
+      if (lastParsed.route?.extraStops?.length) {
+        const chain = [lastParsed.route.from, ...lastParsed.route.extraStops, lastParsed.route.to].join(' → ');
+        log(`Маршрут с несколькими точками выгрузки: ${chain}. Промежуточные точки будут добавлены на сайте автоматически.`);
+      }
+      if (lastParsed.price.negotiable) log('⚠️ В сообщении похоже на "ставка договорная" - проверьте цену.');
+      if (!fContactName.input.value || !fContactPhone.input.value) {
+        log('⚠️ Заполните "Контактное лицо" и "Телефон" ниже - без них поля на сайте останутся пустыми. Значения запомнятся для следующих заявок.');
+      }
+      fillBtn.disabled = false;
+      fillBtn.style.opacity = 1;
+
+      if (loadIsToday && !timeWasExplicit) recomputeLoadTime(fFrom.input.value, fDate.input.value);
+      recomputeDateTo();
+    };
+
+    // Заполняет поля окна одним заказом, распознанным YandexGPT (формат см. в
+    // buildAiPrompt). Структура заказа от ИИ проще, чем lastParsed от regex-
+    // разбора (нет "альтернативных дат"/"нескольких дат через и" и т.п.) -
+    // поэтому это отдельная функция, а не переиспользование кода parseBtn
+    // выше. Расчёт даты выгрузки по расстоянию (recomputeDateTo) переиспользуем
+    // как есть - собираем для него "псевдо-lastParsed" в том же формате, что
+    // ожидает computeDateTo().
+    // Иногда YandexGPT возвращает дату не в виде дд.мм.гггг, а с "хвостом"
+    // от собственного объяснения/примера (например, буквально "29.09.<год>",
+    // если в промпте-примере не подставить настоящий год) - подставлять такую
+    // "дату" в форму нельзя, сайт её не поймёт. Проверяем строгий формат и,
+    // если он не соблюдён, откатываемся на сегодняшнюю дату с явным
+    // предупреждением в логе, а не молча передаём мусор дальше.
+    function sanitizeAiDate(value, fallback, fieldLabel, warningsOut) {
+      if (!value) return fallback;
+      if (/^\d{2}\.\d{2}\.\d{4}$/.test(value)) return value;
+      warningsOut.push(`⚠️ ИИ вернул поле "${fieldLabel}" не в формате дд.мм.гггг ("${value}") - подставлена сегодняшняя дата, проверьте и поправьте вручную.`);
+      return fallback;
+    }
+
+    function applyAiOrder(order) {
+      const dateWarnings = [];
+      fFrom.input.value = applyDefaultCityAddress(order.from || '');
+      fTo.input.value = applyDefaultCityAddress(order.to || '');
+      fExtraStops.input.value = (order.extraStops || []).map(applyDefaultCityAddress).join('; ');
+      let aiDate = sanitizeAiDate(order.date, fmtDate(new Date()), 'date', dateWarnings);
+      let aiDateTo = sanitizeAiDate(order.dateTo, aiDate, 'dateTo', dateWarnings);
+      // Окно/диапазон для даты ПОГРУЗКИ ("чт-пт", "02-03.10" или обычное
+      // "или" между двумя датами - см. buildAiPrompt) - используется ниже,
+      // чтобы на сайте указать настоящий интервал ("Дата въезда, от"/"до")
+      // вместо одной угаданной даты (см. loadingDateWindowTo и setDateTime).
+      // Это НЕЗАВИСИМО от aiDateTo выше - та дата отдельной, настоящей
+      // ВЫГРУЗКИ, а не второй границы окна погрузки. fallback=null у
+      // sanitizeAiDate: если ИИ прислал что-то не в формате дд.мм.гггг -
+      // просто не используем окно (предупреждение в dateWarnings всё равно
+      // появится), а не подставляем произвольную дату.
+      let aiDateWindowTo = order.dateWindowTo ? sanitizeAiDate(order.dateWindowTo, null, 'dateWindowTo', dateWarnings) : null;
+      if (aiDateWindowTo === aiDate) aiDateWindowTo = null; // не дублировать окно из одного и того же дня
+      // Код-level подстраховка от ошибки ИИ в расчёте даты по дню недели
+      // ("на чт", "на чт-пт" и т.п., без чисел) - см. подробное пояснение у
+      // detectWeekdayOnlyDates() выше. Эта функция корректирует ТОЛЬКО дату
+      // погрузки - диапазон из двух дней недели ("чт-пт") означает окно для
+      // погрузки ("либо четверг, либо пятница"), а не пару погрузка/выгрузка,
+      // поэтому про дату выгрузки он ничего не говорит. Применяем только
+      // когда ИИ распознал РОВНО ОДИН заказ в сообщении: при нескольких
+      // заказах день недели в тексте может относиться не ко всем из них
+      // одинаково, а однозначно сопоставить упоминание конкретному заказу по
+      // общему тексту сообщения нельзя - в этом случае доверяем ответу ИИ как
+      // есть, как и раньше.
+      const weekdayOverride = aiOrders.length === 1 ? detectWeekdayOnlyDates(textarea.value) : null;
+      if (weekdayOverride && aiDate !== weekdayOverride.date) {
+        dateWarnings.push(`ℹ️ Дата погрузки скорректирована по дню недели из сообщения: ${weekdayOverride.date} (ИИ посчитал ${order.date || 'дату не определил'}) - расчёт по дню недели надёжнее подсчёта ИИ, проверьте вручную.`);
+        aiDate = weekdayOverride.date;
+        // Если ИИ не назвал отдельную дату выгрузки - aiDateTo сейчас всё ещё
+        // равен СТАРОЙ (некорректной) дате погрузки, на которую он откатился
+        // как на fallback выше (sanitizeAiDate). Синхронизируем его с уже
+        // исправленной датой погрузки - ровно как это делает обычный
+        // (не ИИ) разбор для одной названной даты (см. parseBtn.onclick:
+        // fDateTo.input.value = fDate.input.value) - дальше её, как обычно,
+        // уточнит recomputeDateTo() по расстоянию маршрута, если получится.
+        if (!order.dateTo) aiDateTo = aiDate;
+      }
+      // Диапазон дней недели, обнаруженный код-level проверкой выше, надёжнее
+      // подсчёта ИИ и для dateWindowTo тоже - подставляем его ВСЕГДА, когда
+      // weekdayOverride нашёл именно диапазон (dateWindowTo у него есть),
+      // независимо от того, нужно ли было поправить саму "date" (ИИ мог
+      // верно угадать ближайший день, но ошибиться со вторым днём окна, или
+      // наоборот).
+      if (weekdayOverride && weekdayOverride.dateWindowTo) {
+        aiDateWindowTo = weekdayOverride.dateWindowTo;
+      }
+      if (aiDateWindowTo) {
+        dateWarnings.push(`ℹ️ ИИ распознал окно для погрузки: ${aiDate} или ${aiDateWindowTo} - при заполнении на сайте будет указан период прибытия (от ${aiDate} до ${aiDateWindowTo}), галочка "Выбрать период прибытия" выставится автоматически.`);
+      }
+      fDate.input.value = aiDate;
+      fDateTo.input.value = aiDateTo;
+      // Время погрузки, если ИИ его не вернул: та же логика, что и в обычном
+      // regex-разборе (см. pickTime) - НЕ просто время по умолчанию из
+      // настроек (09:00), а, если погрузка сегодня, текущее время по месту
+      // погрузки +3ч (с округлением вверх до часа и учётом часового пояса
+      // города погрузки, а не часов этого компьютера). Раньше здесь всегда
+      // подставлялось settings.defaultTime, из-за чего при погрузке сегодня
+      // ИИ-разбор всегда показывал 09:00 вместо актуального времени.
+      const timeWasExplicit = !!order.time;
+      const loadIsTodayAi = fDate.input.value === fmtDate(new Date());
+      // Сразу - быстрый запасной вариант, часовой пояс уточнится асинхронно
+      // ниже (recomputeLoadTime), как и в обычном regex-разборе.
+      fTime.input.value = pickTime({ time: { exact: order.time, before: null, from: null, after: null } }, settings, fDate.input.value, null);
+      // Диспетчеры часто пишут ставку сокращённо ("80" вместо "80 000 руб.") -
+      // тот же приём, что и в обычном regex-разборе (см. extractPrice): если
+      // число меньше 1000, это явно тысячи рублей, а не рубли буквально.
+      // YandexGPT не всегда сам это домножает, хотя формально его просили
+      // вернуть именно рубли.
+      let normalizedPrice = order.priceAmount;
+      if (typeof normalizedPrice === 'number' && normalizedPrice > 0 && normalizedPrice < 1000) {
+        normalizedPrice *= 1000;
+      }
+      // "без НДС" (не "нал"/cashPayment) - см. applyNoVatMarkup: пересчитываем
+      // ставку (+22%) и помечаем её уже как "с НДС" для формы; "нал" остаётся
+      // без изменений (и без НДС), тот же порядок, что и в обычном regex-разборе.
+      const adjustedPrice = applyNoVatMarkup(normalizedPrice, order.vat, !!order.cashPayment);
+      fPrice.input.value = adjustedPrice.amount || '';
+      // Ставка перевозчика - та же логика, что и в обычном разборе (см.
+      // computeInvitedFleetPrice): -10% от ИТОГОВОЙ цены клиента (уже с
+      // учётом наценки за "без НДС" выше), округлённые вниз до 1000 руб.
+      fInvitedPrice.input.value = computeInvitedFleetPrice(adjustedPrice.amount, settings.invitedFleetPrice);
+      fVat.input.value = adjustedPrice.vat === false ? 'нет' : (adjustedPrice.vat === true ? 'да' : (settings.ndsDefault ? 'да' : 'нет'));
+      const noVatMarkupApplied = order.vat === false && !order.cashPayment && typeof normalizedPrice === 'number' && normalizedPrice > 0;
+
+      const detectedTypes = order.trailerTypes || [];
+      const mappedSiteTexts = [...new Set(detectedTypes.map(t => TRAILER_TYPE_TO_CHECKBOX[(t || '').toLowerCase()]).filter(Boolean))];
+      const unmapped = detectedTypes.filter(t => !TRAILER_TYPE_TO_CHECKBOX[(t || '').toLowerCase()]);
+      fTrailer.checkboxes.forEach(cb => {
+        cb.checked = mappedSiteTexts.length ? mappedSiteTexts.includes(cb.dataset.siteText) : (cb.dataset.siteText === DEFAULT_TRAILER_SITE_TEXT);
+      });
+      applyTrailerMutualExclusion();
+      applyTrailerRestrictionToLoadingType();
+
+      // Код-level подстраховка от ошибки ИИ "объём кузова -> вес груза" (см.
+      // extractVolumeM3Mentions выше, пояснение в buildAiPrompt) - если то,
+      // что ИИ вернул как вес, точно совпадает с одним из чисел объёма,
+      // упомянутых в исходном сообщении (сообщение может содержать несколько
+      // заказов - проверяем по всему тексту, а не только по текущему), это
+      // почти наверняка спутанный объём, а не настоящий вес - сбрасываем на
+      // значение по умолчанию и просим проверить вручную, вместо того чтобы
+      // молча подставить неверную цифру в форму.
+      const volumeMentionsAi = extractVolumeM3Mentions(textarea.value);
+      const weightLooksLikeVolume = typeof order.weight === 'number' && volumeMentionsAi.includes(order.weight);
+      fWeight.input.value = (!weightLooksLikeVolume && order.weight) || settings.cargoWeight;
+      fCargoType.input.value = order.cargoType || settings.cargoType;
+      fVehicles.input.value = order.vehicleCount || 1;
+      applyVehicleCountRestrictionToDangerousActions();
+      fClient.input.value = '';
+      fContactName.input.value = settings.contactName || '';
+      fContactPhone.input.value = settings.contactPhone || '';
+
+      logBox.textContent = '';
+      log('Поля заполнены по ответу YandexGPT - это ИИ-разбор, обязательно проверьте все поля перед заполнением сайта.');
+      dateWarnings.forEach(log);
+      if (order.priceNegotiable) log('⚠️ ИИ распознал договорную цену/торг - проверьте поле "Стоимость заказа".');
+      if (noVatMarkupApplied) log(`ℹ️ В сообщении цена "без НДС" - к ставке добавлено 22%, в форме указано "с НДС": ${adjustedPrice.amount} руб. Проверьте и, если ИИ ошибся с "без НДС"/"нал", поправьте поле "Стоимость заказа" и "НДС" вручную.`);
+      if (weightLooksLikeVolume) log(`⚠️ ИИ вернул вес груза = ${order.weight}, но в сообщении это похоже на объём кузова (мз/м3), а не вес - поле "Вес, т" сброшено на значение по умолчанию (${settings.cargoWeight}), укажите вес вручную, если он есть в сообщении.`);
+      if (unmapped.length) {
+        log(`ℹ️ ИИ определил тип(ы) прицепа, которых нет в быстром списке: ${unmapped.join(', ')} - отметьте нужный вариант вручную в поле "Типы прицепов" на сайте.`);
+      }
+      if (order.comment) log(`Комментарий от ИИ: ${order.comment}`);
+      if (!fContactName.input.value || !fContactPhone.input.value) {
+        log('⚠️ Заполните "Контактное лицо" и "Телефон" ниже - без них поля на сайте останутся пустыми.');
+      }
+
+      fillBtn.disabled = false;
+      fillBtn.style.opacity = 1;
+
+      // "Псевдо-разбор" в формате, который ожидает computeDateTo()/recomputeDateTo() -
+      // если ИИ не дал явную дату выгрузки, дата будет уточнена по расчётному
+      // расстоянию маршрута (тот же механизм, что и для обычного regex-разбора).
+      // Берём УЖЕ ПРОВЕРЕННЫЕ (sanitizeAiDate) значения из полей формы, а не
+      // сырые order.date/order.dateTo - иначе "быстрый путь" ниже в
+      // recomputeDateTo() (когда обе даты уже известны явно) мог бы затереть
+      // поле "Дата выгрузки" обратно "битым" значением от ИИ.
+      const safeDate = fDate.input.value;
+      const safeDateTo = fDateTo.input.value;
+      // Окно для ПОГРУЗКИ (aiDateWindowTo) и отдельная настоящая дата
+      // ВЫГРУЗКИ (dateTo) - два независимых механизма (см. выше), поэтому
+      // "dates"/"datesAreAlternative" собираем так, чтобы loadingDateWindowTo()
+      // и hasExplicitDateTo() (общие для regex- и ИИ-разбора) видели ровно то
+      // же самое, что и при обычном regex-разборе диапазона дат:
+      // - только окно погрузки -> [earlier, later], datesAreAlternative=true;
+      // - окно погрузки + отдельная dateTo -> [earlier, later, dateTo], datesAreAlternative=true;
+      // - только dateTo (окна нет) -> [date, dateTo], datesAreAlternative=false (как раньше);
+      // - ничего из этого -> [date] или [].
+      const hasAiWindow = !!aiDateWindowTo && aiDateWindowTo !== safeDate;
+      const hasAiExplicitDateTo = !!order.dateTo && safeDateTo !== safeDate;
+      let aiDatesForParsed;
+      if (hasAiWindow && hasAiExplicitDateTo) {
+        aiDatesForParsed = [{ date: safeDate }, { date: aiDateWindowTo }, { date: safeDateTo }];
+      } else if (hasAiWindow) {
+        aiDatesForParsed = [{ date: safeDate }, { date: aiDateWindowTo }];
+      } else if (hasAiExplicitDateTo) {
+        aiDatesForParsed = [{ date: safeDate }, { date: safeDateTo }];
+      } else {
+        aiDatesForParsed = safeDate ? [{ date: safeDate }] : [];
+      }
+      lastParsed = {
+        dates: aiDatesForParsed,
+        datesAreAlternative: hasAiWindow,
+        datesAreMultiOrder: false,
+        declaredDistanceKm: null,
+        route: { from: order.from, to: order.to },
+        // Не обязательно для computeDateTo/recomputeDateTo (им нужны только dates/
+        // declaredDistanceKm/route выше), но fillBtn.onclick при сборке данных для
+        // заполнения сайта отдельно читает lastParsed.price.negotiable - без этого
+        // поля флаг "торг"/"договорная цена", который распознал ИИ, терялся бы.
+        price: { negotiable: !!order.priceNegotiable },
+      };
+      multiDateWrap.style.display = 'none';
+      multiDateSelect.innerHTML = '';
+      if (loadIsTodayAi && !timeWasExplicit) recomputeLoadTime(order.from, safeDate);
+      recomputeDateTo();
+    }
+
+    aiBtn.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return;
+      const settingsNow = getSettings();
+      if (!settingsNow.yandexApiKey || !settingsNow.yandexFolderId) {
+        logBox.textContent = '';
+        log('⚠️ YandexGPT не настроен. Откройте меню расширения Tampermonkey (значок в браузере) → "Настройки YandexGPT (API-ключ)" и укажите API-ключ и Folder ID.');
+        return;
+      }
+      aiBtn.disabled = true;
+      logBox.textContent = '';
+      log('Отправляю сообщение в YandexGPT, подождите несколько секунд...');
+      try {
+        aiOrders = await callYandexGPT(text, settingsNow);
+        if (!aiOrders.length) { log('ИИ не нашёл в сообщении ни одного заказа.'); sessionStorage.removeItem(AI_ORDERS_STORAGE_KEY); return; }
+        aiOrdersDone = [];
+        log(`ИИ распознал заказ(ов): ${aiOrders.length}.`);
+        if (aiOrders.length > 1) {
+          aiOrderLabel.textContent = 'Несколько заказов в сообщении - выберите, какой заполнить сейчас. После заполнения и сохранения на сайте список остальных останется здесь же (можно даже закрыть это окно и открыть заново) - выберите следующий заказ и повторите.';
+          renderAiOrderOptions();
+          aiOrderSelect.value = '0';
+          aiOrderWrap.style.display = 'block';
+        } else {
+          aiOrderWrap.style.display = 'none';
+          aiOrderSelect.innerHTML = '';
+        }
+        currentAiIndex = 0;
+        applyAiOrder(aiOrders[0]);
+        saveAiOrdersState();
+      } catch (e) {
+        log('⚠️ ' + (e && e.message ? e.message : String(e)));
+        console.error(e);
+      } finally {
+        aiBtn.disabled = false;
+      }
+    };
+
+    aiOrderSelect.onchange = () => {
+      const idx = parseInt(aiOrderSelect.value, 10);
+      if (aiOrders[idx]) { currentAiIndex = idx; applyAiOrder(aiOrders[idx]); }
+    };
+
+    // Восстанавливаем список ИИ-заказов из предыдущего открытия этого окна (в
+    // пределах той же вкладки браузера) - см. AI_ORDERS_STORAGE_KEY выше. Это
+    // решает практическую проблему: если в сообщении несколько заказов (разные
+    // маршруты/даты), логисту не нужно заново нажимать "Распознать через ИИ"
+    // под каждый из них - после заполнения и сохранения одного на сайте
+    // (страница при этом обычно перезагружается или переключает вид) список
+    // остальных заказов из того же сообщения остаётся доступным.
+    (function restoreAiOrdersState() {
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem(AI_ORDERS_STORAGE_KEY) || 'null'); } catch (e) { saved = null; }
+      if (!saved || !Array.isArray(saved.orders) || !saved.orders.length) return;
+      const done = Array.isArray(saved.done) ? saved.done : [];
+      if (done.length >= saved.orders.length) { sessionStorage.removeItem(AI_ORDERS_STORAGE_KEY); return; }
+      aiOrders = saved.orders;
+      aiOrdersDone = done;
+      textarea.value = saved.raw || '';
+      const remaining = aiOrders.length - aiOrdersDone.length;
+      if (aiOrders.length > 1) {
+        aiOrderLabel.textContent = 'Несколько заказов в сообщении - выберите, какой заполнить сейчас. После заполнения и сохранения на сайте список остальных останется здесь же (можно даже закрыть это окно и открыть заново) - выберите следующий заказ и повторите.';
+        renderAiOrderOptions();
+        const firstRemaining = aiOrders.findIndex((_, i) => !aiOrdersDone.includes(i));
+        currentAiIndex = firstRemaining >= 0 ? firstRemaining : 0;
+        aiOrderSelect.value = String(currentAiIndex);
+        aiOrderWrap.style.display = 'block';
+      } else {
+        currentAiIndex = 0;
+      }
+      applyAiOrder(aiOrders[currentAiIndex]);
+      log(`Восстановлен список заказов из предыдущего распознавания ИИ по этому же сообщению: осталось заполнить ${remaining} из ${aiOrders.length}.`);
+    })();
+
+    fillBtn.onclick = async () => {
+      // "Запустить в работу" - ЖЁСТКАЯ блокировка (без диалога, по просьбе
+      // Ramil), если дата погрузки не прошла проверку на правдоподобность
+      // (см. loadDateSanityIssue - реальный случай: "01.09" вместо "01.10").
+      // Это не диалог "точно ли продолжить", а прямой отказ - галочку логист
+      // мог поставить и забыть, а опечатка в дате обнаруживается только
+      // здесь. Обычное заполнение полей при этом всё равно происходит -
+      // блокируется только сама автоматическая кнопка.
+      const wantLaunchRaw = fDanger.launchCb.checked;
+      const wantSync = fDanger.syncCb.checked;
+      const dateIssue = wantLaunchRaw ? loadDateSanityIssue(fDate.input.value) : null;
+      const wantLaunch = wantLaunchRaw && !dateIssue;
+      if (dateIssue) {
+        log(`⛔ "Запустить в работу" ЗАБЛОКИРОВАНО: ${dateIssue} (сейчас в поле "Дата погрузки": ${fDate.input.value}). Похоже на опечатку - проверьте и исправьте дату. Форма будет заполнена как обычно, финальный клик - вручную после проверки.`);
+      }
+      // Если после проверки даты осталось хотя бы одно реальное необратимое
+      // действие - обязательно спрашиваем подтверждение ДО того, как вообще
+      // что-либо заполняем на сайте. Это последний шанс проверить поля заявки
+      // выше и передумать. Если действий нет (галочки не стояли, или
+      // "Запустить в работу" заблокирован проверкой даты, а "Синхронизировать"
+      // не стоит) - поведение как раньше, без единого диалога.
+      if (wantLaunch || wantSync) {
+        const actionsList = [];
+        if (wantLaunch) actionsList.push('нажать «Запустить в работу»');
+        if (wantSync) actionsList.push('нажать «Синхронизировать» с АТИ');
+        const confirmed = confirm(
+          `Внимание: после заполнения формы скрипт сам ${actionsList.join(' и ')} - это реальное необратимое действие на сайте.\n\nПроверьте ещё раз все поля заявки выше.\n\nПродолжить?`
+        );
+        if (!confirmed) {
+          log('Отменено логистом в окне подтверждения - галочки сброшены, на сайте ничего не менялось.');
+          fDanger.launchCb.checked = false;
+          fDanger.syncCb.checked = false;
+          return;
+        }
+      }
+      // Если расчёт даты выгрузки по расстоянию и/или уточнение времени по
+      // часовому поясу ещё не закончились (логист нажал "Заполнить на сайте"
+      // сразу после "Распознать") - ждём здесь, иначе на сайт уйдут ещё не
+      // уточнённые значения (дата выгрузки = дате погрузки, время - по
+      // запасному варианту).
+      if (pendingDateToCalc || pendingTimeCalc) {
+        fillBtn.disabled = true;
+        log('Уточняю дату выгрузки и время погрузки, минутку...');
+        // Race с таймаутом - подстраховка на случай, если расчёт всё же
+        // где-то зависнет (например, недоступен /api/Map/SearchAddresses):
+        // заполнение сайта не должно блокироваться навсегда только из-за
+        // необязательных уточнений.
+        let timedOut = false;
+        await Promise.race([
+          Promise.all([pendingDateToCalc, pendingTimeCalc]),
+          sleep(8000).then(() => { timedOut = true; }),
+        ]);
+        if (timedOut) {
+          log('⚠️ Расчёт затянулся - продолжаю без уточнения (проверьте дату выгрузки и время погрузки вручную).');
+        }
+      }
+      const data = {
+        raw: textarea.value.trim(),
+        from: fFrom.input.value.trim(),
+        to: fTo.input.value.trim(),
+        extraStops: fExtraStops.input.value.trim()
+          ? fExtraStops.input.value.split(/;|\n/).map(s => s.trim()).filter(Boolean)
+          : [],
+        date: fDate.input.value.trim(),
+        dateTo: fDateTo.input.value.trim(),
+        // Была ли дата выгрузки НАЗВАНА ПРЯМО В СООБЩЕНИИ (а не посчитана по
+        // расстоянию/оставлена равной дате погрузки) - см. computeDateTo(),
+        // source==='explicit' там же. Используется в fillOrderOnSite для
+        // маршрутов с промежуточными точками (см. dropPoints ниже) - если
+        // явной даты нет, дату КОНЕЧНОЙ точки тоже считаем по расстоянию
+        // перегона от последней промежуточной точки, а не оставляем как есть.
+        dateToIsExplicit: hasExplicitDateTo(lastParsed),
+        // Окно/диапазон для даты ПОГРУЗКИ (см. loadingDateWindowTo выше) -
+        // используется в fillOrderOnSite, чтобы вместо одной "ближайшей" даты
+        // указать на сайте настоящий интервал ("Дата въезда, от"/"до"). Если
+        // логист уже успел вручную поменять поле "Дата" после "Распознать" (и
+        // оно больше не равно более ранней дате окна из lastParsed) - окно
+        // больше не актуально, лучше одна (поправленная вручную) дата, чем
+        // неверный интервал.
+        dateWindowTo: (() => {
+          const windowTo = loadingDateWindowTo(lastParsed);
+          if (!windowTo) return null;
+          return fDate.input.value.trim() === lastParsed.dates[0].date ? windowTo : null;
+        })(),
+        time: fTime.input.value.trim(),
+        priceAmount: parseFloat(fPrice.input.value) || null,
+        invitedFleetPrice: parseFloat(fInvitedPrice.input.value) || 1,
+        vat: fVat.input.value.trim().toLowerCase() === 'нет' ? false : true,
+        // Опциональная цепочка - lastParsed после "Распознать через ИИ" не содержит
+        // .price (это "псевдо-разбор" только для расчёта даты выгрузки, см.
+        // applyAiOrder) - без неё клик по кнопке падал с TypeError ДО первого же
+        // log() и заполнение сайта не запускалось вообще, никак не сообщая об ошибке.
+        priceNegotiable: !!lastParsed?.price?.negotiable,
+        trailerTypes: fTrailer.checkboxes.filter(cb => cb.checked).map(cb => cb.dataset.siteText),
+        loadingType: fLoadingType.checkboxes.find(cb => cb.checked)?.dataset.siteText || DEFAULT_LOADING_TYPE_SITE_TEXT,
+        weight: parseFloat(fWeight.input.value) || null,
+        cargoType: fCargoType.input.value.trim(),
+        vehicleCount: parseInt(fVehicles.input.value, 10) || 1,
+        clientName: fClient.input.value.trim(),
+        contactName: fContactName.input.value.trim(),
+        contactPhone: fContactPhone.input.value.trim(),
+        // Влияет на выбор "Отображение заказа" в fillOrderOnSite (см.
+        // ORDER_VISIBILITY_ALL_OPTION) - берём именно состояние галочки на
+        // момент заполнения, а не то, удастся ли реально нажать
+        // "Синхронизировать" ниже (это отдельная, более узкая проверка).
+        wantSync,
+      };
+      if (!data.from) { log('Укажите город отправления.'); fillBtn.disabled = false; return; }
+      // Запоминаем контактное лицо/телефон на будущее, чтобы не вводить их каждый раз заново.
+      if (data.contactName || data.contactPhone) {
+        Object.assign(settings, saveSettings({ contactName: data.contactName, contactPhone: data.contactPhone }));
+      }
+      fillBtn.disabled = true;
+      try {
+        await fillOrderOnSite(data, settings, log);
+        // Необратимые действия - ТОЛЬКО если галочки были включены и логист
+        // подтвердил это выше. "Синхронизировать с АТИ" имеет смысл только
+        // для УЖЕ созданного заказа, поэтому без "Запустить в работу" эта
+        // галочка пропускается с явным предупреждением, а не выполняется
+        // вхолостую (кнопки "Синхронизировать" ещё не существует на форме
+        // нового, не сохранённого заказа).
+        if (wantLaunch) {
+          const launched = await clickLaunchIntoWork(log);
+          if (wantSync) {
+            if (launched) await clickSyncWithAti(log);
+            else log('⚠️ Синхронизация с АТИ пропущена - не удалось нажать «Запустить в работу».');
+          }
+        } else if (wantSync) {
+          if (dateIssue) {
+            log('⚠️ Синхронизация с АТИ тоже пропущена - "Запустить в работу" заблокировано проверкой даты погрузки (см. предупреждение выше).');
+          } else {
+            log('⚠️ Галочка "Синхронизировать с АТИ" пропущена - без "Запустить в работу" заказ ещё не создан. Включите обе галочки вместе.');
+          }
+        }
+        // Если это был заказ из списка, распознанного ИИ - отмечаем его
+        // выполненным и сохраняем обновлённый список (см. AI_ORDERS_STORAGE_KEY),
+        // чтобы после перехода/перезагрузки страницы сайтом при сохранении
+        // заказа остальные заказы из того же сообщения не потерялись.
+        if (currentAiIndex !== null && aiOrders[currentAiIndex]) {
+          if (!aiOrdersDone.includes(currentAiIndex)) aiOrdersDone.push(currentAiIndex);
+          if (aiOrdersDone.length >= aiOrders.length) {
+            log('✅ Все заказы из этого сообщения (ИИ-разбор) заполнены - список очищен.');
+            aiOrders = [];
+            aiOrdersDone = [];
+            currentAiIndex = null;
+            aiOrderWrap.style.display = 'none';
+            aiOrderSelect.innerHTML = '';
+            sessionStorage.removeItem(AI_ORDERS_STORAGE_KEY);
+          } else {
+            renderAiOrderOptions();
+            aiOrderSelect.value = String(currentAiIndex);
+            log(`Заказ №${currentAiIndex + 1} отмечен как заполненный. Осталось: ${aiOrders.length - aiOrdersDone.length} - выберите следующий в списке выше и снова нажмите "Заполнить на сайте".`);
+            saveAiOrdersState();
+          }
+        }
+      } catch (e) {
+        log('Ошибка автозаполнения: ' + (e && e.message ? e.message : e));
+        console.error(e);
+      }
+      fillBtn.disabled = false;
+    };
+
+    clearBtn.onclick = () => {
+      textarea.value = '';
+      [fFrom, fTo, fExtraStops, fDate, fDateTo, fTime, fPrice, fInvitedPrice, fVat, fWeight, fCargoType, fClient, fContactName, fContactPhone]
+        .forEach(f => { f.input.value = ''; });
+      fVehicles.input.value = '1';
+      applyVehicleCountRestrictionToDangerousActions();
+      fTrailer.checkboxes.forEach(cb => { cb.checked = (cb.dataset.siteText === DEFAULT_TRAILER_SITE_TEXT); });
+      fLoadingType.checkboxes.forEach(cb => { cb.checked = (cb.dataset.siteText === DEFAULT_LOADING_TYPE_SITE_TEXT); cb.disabled = false; });
+      fDanger.launchCb.checked = false;
+      fDanger.syncCb.checked = false;
+      multiDateWrap.style.display = 'none';
+      multiDateSelect.innerHTML = '';
+      aiOrderWrap.style.display = 'none';
+      aiOrderSelect.innerHTML = '';
+      lastParsed = null;
+      aiOrders = [];
+      aiOrdersDone = [];
+      currentAiIndex = null;
+      pendingDateToCalc = null;
+      pendingTimeCalc = null;
+      fillBtn.disabled = true;
+      fillBtn.style.opacity = 0.5;
+      sessionStorage.removeItem(AI_ORDERS_STORAGE_KEY);
+      logBox.textContent = '';
+      log('Форма и список заказов из ИИ-распознавания очищены - можно вставлять новое сообщение.');
+    };
+
+    const actions = el('div', { class: 'alob-actions' }, [parseBtn, aiBtn, fillBtn, clearBtn]);
+
+    modal.appendChild(close);
+    modal.appendChild(title);
+    modal.appendChild(hint);
+    modal.appendChild(textarea);
+    modal.appendChild(multiDateWrap);
+    modal.appendChild(aiOrderWrap);
+    modal.appendChild(grid);
+    modal.appendChild(actions);
+    modal.appendChild(logBox);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+  }
+
+  function injectButton() {
+    if (document.getElementById('alob-fab')) return;
+    const btn = el('button', { id: 'alob-fab', title: 'Заявка из сообщения' , text: '📋'});
+    btn.onclick = openModal;
+    document.body.appendChild(btn);
+  }
+
+  /* =========================================================================
+   *  4. НАСТРОЙКИ ЧЕРЕЗ МЕНЮ TAMPERMONKEY
+   * ========================================================================= */
+  function openSettingsPrompt() {
+    const s = getSettings();
+    const contactName = prompt('ФИО контактного лица (диспетчера) для заказов:', s.contactName || '');
+    if (contactName === null) return;
+    const contactPhone = prompt('Телефон контактного лица (+7XXXXXXXXXX):', s.contactPhone || '');
+    if (contactPhone === null) return;
+    saveSettings({ contactName, contactPhone });
+    alert('Настройки сохранены.');
+  }
+
+  // Ключ API YandexGPT вводится ТОЛЬКО здесь, через системный prompt() браузера,
+  // и сохраняется ТОЛЬКО локально (GM_setValue - хранилище конкретного браузера
+  // этого логиста). Ключ никогда не попадает в файл скрипта и не передаётся
+  // никуда, кроме самого API YandexGPT при нажатии кнопки "Распознать через ИИ".
+  function openAiSettingsPrompt() {
+    const s = getSettings();
+    const maskedCurrent = s.yandexApiKey ? ('сохранён, оканчивается на ...' + s.yandexApiKey.slice(-4)) : '(не задан)';
+    const apiKeyInput = prompt(
+      `API-ключ YandexGPT (Api-Key из aistudio.yandex.ru).\nТекущий ключ: ${maskedCurrent}\nВставьте новый ключ, либо оставьте это поле пустым, чтобы оставить текущий:`, ''
+    );
+    if (apiKeyInput === null) return;
+    const finalKey = apiKeyInput.trim() ? apiKeyInput.trim() : s.yandexApiKey;
+    const folderId = prompt(
+      'Folder ID каталога в Yandex Cloud (console.yandex.cloud) - это ID КАТАЛОГА ("default" и т.п.), а НЕ ID облака:',
+      s.yandexFolderId || ''
+    );
+    if (folderId === null) return;
+    saveSettings({ yandexApiKey: finalKey, yandexFolderId: folderId.trim() });
+    alert('Настройки YandexGPT сохранены в этом браузере.');
+  }
+
+  if (typeof GM_registerMenuCommand === 'function') {
+    GM_registerMenuCommand('Настройки заявки (имя/телефон)', openSettingsPrompt);
+    GM_registerMenuCommand('Настройки YandexGPT (API-ключ)', openAiSettingsPrompt);
+  }
+
+  /* =========================================================================
+   *  5. СТАРТ
+   * ========================================================================= */
+  injectStyle();
+  injectButton();
+  // На SPA-роутинге кнопка может пропасть при перерисовке - подстрахуемся.
+  setInterval(injectButton, 3000);
+  // Блокировка кнопки «Запустить в работу» при неправдоподобной дате погрузки
+  // (см. guardLaunchButtonClicks выше) - работает всегда, а не только из
+  // окна заявки, ставится один раз на весь сайт.
+  guardLaunchButtonClicks();
+
+})();
