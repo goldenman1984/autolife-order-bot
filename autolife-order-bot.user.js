@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Автолайф: заявка -> заказ на CargoRun
 // @namespace    autolife.cargorun.orderbot
-// @version      1.27.41
+// @version      1.28.0
 // @description  Теперь скрипт распространяется через GitHub (goldenman1984/autolife-order-bot) с автообновлением - Tampermonkey сам подхватывает новые версии, переустанавливать вручную у каждого логиста не нужно. Вставляешь сообщение от логиста (текст) - скрипт распознаёт маршрут/цену/дату/ТС и сам заполняет форму "Новый заказ" на loads.cargorun.ru. По умолчанию финальный клик "Запустить в работу"/"Сохранить черновик" всегда делает человек; по явным галочкам и подтверждению скрипт может сам нажать "Запустить в работу" и/или "Синхронизировать" с АТИ. Кнопка "Запустить в работу" (и своя, и настоящая на сайте) всегда заблокирована, если дата погрузки не прошла проверку на правдоподобность. При количестве ТС больше 1 галочки "Запустить в работу" и "Синхронизировать с АТИ" в окне заявки недоступны (сайт не поддерживает запуск в работу для нескольких ТС сразу) - если были включены, автоматически снимаются; в этом случае заказ сохраняется на сайте как черновик вручную. Для Москвы и Санкт-Петербурга без точного адреса подставляется известный адрес по умолчанию, а если точный адрес есть в самом сообщении - ИИ-разбор теперь использует именно его (в списке "Несколько заказов" при этом показывается короткое название города, а не весь адрес). Поле "Тип груза" заполняется из закрытого списка сайта (с запасным вариантом "ТНП"). ИИ-разбор (YandexGPT) выдерживает сообщения с большим числом отдельных заказов сразу (например, прайс-лист на много направлений). Комментарий на сайте больше не содержит цифру с ценой (её видит перевозчик/водитель) - включая "голую" цену без "тр"/"руб"/"ндс" рядом. Расчёт расстояния маршрута теперь устойчивее к временным сбоям геокодера и объясняет причину в логе, если не удалось. При включённой галочке "Синхронизировать с АТИ" отображение заказа выставляется "Всем перевозчикам" вместо "Выбранным перевозчикам". Два дня недели подряд через дефис без чисел ("на чт-пт"), а теперь и два числа дня подряд через дефис с одним месяцем на двоих ("02-03.10"), распознаются как ОКНО для погрузки (годится любой из двух дней), а не как пара дат погрузка/выгрузка - и в обычном разборе, и через ИИ; если после такого окна в сообщении отдельно названа ещё одна дата (например "02-03.10 ... 06.10") - именно она берётся как дата выгрузки, а не второе число окна. При 3+ точках маршрута (погрузка + несколько точек выгрузки) дата каждой следующей точки выгрузки считается по расстоянию от ПРЕДЫДУЩЕЙ точки маршрута последовательно (а не одним прыжком от погрузки сразу до последней точки). Время на КАЖДОЙ точке выгрузки (включая единственную точку) считается по расстоянию перегона (700 км/сутки), часовому поясу места прибытия и времени на ПРР на предыдущей точке (по умолчанию 4ч - на столько позже фактического прибытия машина трогается дальше), а не копируется время погрузки; расчётное время вне разумного окна разгрузки [8:00, 19:00) выравнивается на границу этого окна (вечер/ночь - 8:00 следующего дня, раннее утро - 8:00 того же дня). В окне заявки появилось поле "Тип загрузки" (Задняя/Боковая/Верхняя/Полная растентовка, взаимоисключающие галочки, "Задняя" по умолчанию) - выбор автоматически проставляется на сайте в поле "Выберите тип загрузки" ТОЛЬКО в первой точке маршрута (точке погрузки); если отмечен тип прицепа Рефрижератор или Изотерм - тип загрузки можно выбрать только "Задняя" (остальные варианты блокируются). Вариант типа прицепа, который раньше назывался в окне заявки просто "Тент", теперь называется "Тент 92м3" (на сайте по-прежнему подставляется просто "Тент" - это название не менялось). "Тент 110 м3" теперь несовместим ни с одним другим типом прицепа - отметка любого другого типа (Тент 92м3/Рефрижератор/Изотерм) автоматически снимает "Тент 110 м3", и наоборот; остальные типы между собой по-прежнему можно комбинировать. Для даты погрузки, когда в сообщении названо ОКНО из двух дней (диапазон дней недели "чт-пт", числовой диапазон "02-03.10" или обычное "или" между двумя датами), скрипт использует настоящий интервал на сайте (галочка "Выбрать период прибытия" + поле "Дата въезда, до") вместо того, чтобы подставлять одну "ближайшую" дату - теперь это работает И через ИИ-разбор (YandexGPT), а не только при обычном разборе; дата "до" интервала ставится с временем 19:00 (а не временем погрузки, как раньше).
 // @match        https://loads.cargorun.ru/*
 // @run-at       document-idle
@@ -2004,30 +2004,41 @@ ${text}
       let stopDateStr;
       let stopTimeStr;
       if (i === lastDropIdx && data.dateToIsExplicit) {
-        // Дата (и время) выгрузки прямо названы в сообщении - это не оценка
-        // по расстоянию, а прямое указание диспетчера, надёжнее любого
-        // расчёта; не трогаем ни то, ни другое.
+        // Дата выгрузки прямо названа в сообщении - это не оценка по
+        // расстоянию, а прямое указание диспетчера, надёжнее любого расчёта;
+        // дату не трогаем. Время берём из поля "Время выгрузки" в окне заявки
+        // (data.timeTo) - логист мог его проверить/поправить вручную; если
+        // оно почему-то пустое - запасной вариант, как и раньше, время погрузки.
         stopDateStr = data.dateTo || data.date;
-        stopTimeStr = data.time;
+        stopTimeStr = data.timeTo || data.time;
       } else {
-        // Единственная точка выгрузки - dateTo уже посчитана по ЭТОМУ ЖЕ
-        // перегону (from -> to) в окне заявки (computeDateTo), пересчитывать
-        // дату не нужно - но время по этому расстоянию не считалось нигде,
-        // досчитываем его здесь.
+        // Единственная точка выгрузки - и dateTo, и timeTo уже посчитаны по
+        // ЭТОМУ ЖЕ перегону (from -> to) в окне заявки (см. recomputeDateTo) и
+        // показаны логисту в полях "Дата/Время выгрузки" - пересчитывать не
+        // нужно, доверяем им напрямую (логист мог поправить вручную). Для
+        // маршрута с несколькими точками выгрузки (extraStops) это поле не
+        // применяется - там дата и время каждой точки считаются отдельно, по
+        // перегонам, см. ниже.
         const useExistingDate = i === lastDropIdx && dropPoints.length === 1;
-        const est = await estimateRouteKm(prevCity, dropPoints[i], settings);
-        if (est.km) {
-          stopDateStr = useExistingDate
-            ? (data.dateTo || data.date)
-            : addDaysToDateStr(prevDateStr, Math.ceil(est.km / settings.dailyRangeKm));
-          const arrival = await computeArrivalTime(prevCity, prevTimeStr, dropPoints[i], est.km, settings);
-          stopTimeStr = arrival.timeStr;
-          if (arrival.nextDay) stopDateStr = addDaysToDateStr(stopDateStr, 1);
-          log(`Дата и время прибытия в точку "${dropPoints[i]}" уточнены по перегону от "${prevCity}": ~${est.km} км → ${stopDateStr} ${stopTimeStr}. Проверьте и поправьте при необходимости.`);
+        if (useExistingDate && data.timeTo) {
+          stopDateStr = data.dateTo || data.date;
+          stopTimeStr = data.timeTo;
+          log(`Дата и время выгрузки взяты из полей заявки: ${stopDateStr} ${stopTimeStr}.`);
         } else {
-          stopDateStr = useExistingDate ? (data.dateTo || data.date) : prevDateStr;
-          stopTimeStr = prevTimeStr;
-          log(`⚠️ Не удалось оценить перегон "${prevCity}" → "${dropPoints[i]}"${est.reason ? ' (' + est.reason + ')' : ''} - дата и время на этой точке оставлены как есть, проверьте вручную.`);
+          const est = await estimateRouteKm(prevCity, dropPoints[i], settings);
+          if (est.km) {
+            stopDateStr = useExistingDate
+              ? (data.dateTo || data.date)
+              : addDaysToDateStr(prevDateStr, Math.ceil(est.km / settings.dailyRangeKm));
+            const arrival = await computeArrivalTime(prevCity, prevTimeStr, dropPoints[i], est.km, settings);
+            stopTimeStr = arrival.timeStr;
+            if (arrival.nextDay) stopDateStr = addDaysToDateStr(stopDateStr, 1);
+            log(`Дата и время прибытия в точку "${dropPoints[i]}" уточнены по перегону от "${prevCity}": ~${est.km} км → ${stopDateStr} ${stopTimeStr}. Проверьте и поправьте при необходимости.`);
+          } else {
+            stopDateStr = useExistingDate ? (data.dateTo || data.date) : prevDateStr;
+            stopTimeStr = prevTimeStr;
+            log(`⚠️ Не удалось оценить перегон "${prevCity}" → "${dropPoints[i]}"${est.reason ? ' (' + est.reason + ')' : ''} - дата и время на этой точке оставлены как есть, проверьте вручную.`);
+          }
         }
       }
       result.push({ city: dropPoints[i], dateStr: stopDateStr, timeStr: stopTimeStr });
@@ -2416,9 +2427,15 @@ ${text}
     const fFrom = field('Откуда (город)', { type: 'text' });
     const fTo = field('Куда (город, конечная точка)', { type: 'text' });
     const fExtraStops = field('Доп. точки выгрузки (через ;), по пути к конечной', { type: 'text' });
+    // На всю ширину сетки - чтобы следующая за ней пара "Дата/Время погрузки"
+    // (и следом "Дата/Время выгрузки") начиналась с чистой строки и дата с
+    // временем всегда стояли рядом друг с другом, а не вперемешку со
+    // смещением на одну ячейку (Ramil попросил расположить дату и время рядом).
+    fExtraStops.wrap.style.gridColumn = '1 / -1';
     const fDate = field('Дата погрузки (дд.мм.гггг)', { type: 'text' });
-    const fDateTo = field('Дата выгрузки (дд.мм.гггг)', { type: 'text' });
     const fTime = field('Время погрузки (чч:мм)', { type: 'text' });
+    const fDateTo = field('Дата выгрузки (дд.мм.гггг)', { type: 'text' });
+    const fTimeTo = field('Время выгрузки (чч:мм)', { type: 'text' });
     const fPrice = field('Стоимость заказа, руб', { type: 'number' });
     const fInvitedPrice = field('Ставка перевозчика, руб', { type: 'number' });
     const fVat = field('НДС (да/нет)', { type: 'text' });
@@ -2483,7 +2500,7 @@ ${text}
     fVehicles.input.addEventListener('input', applyVehicleCountRestrictionToDangerousActions);
     applyVehicleCountRestrictionToDangerousActions();
 
-    [fFrom, fTo, fExtraStops, fDate, fDateTo, fTime, fPrice, fInvitedPrice, fVat, fTrailer, fLoadingType, fWeight, fCargoType, fVehicles, fClient, fContactName, fContactPhone]
+    [fFrom, fTo, fExtraStops, fDate, fTime, fDateTo, fTimeTo, fPrice, fInvitedPrice, fVat, fTrailer, fLoadingType, fWeight, fCargoType, fVehicles, fClient, fContactName, fContactPhone]
       .forEach(f => grid.appendChild(f.wrap));
     grid.appendChild(fDanger.wrap);
 
@@ -2566,18 +2583,29 @@ ${text}
     function recomputeDateTo() {
       const parsedForDistance = lastParsed;
       const dateFromNow = fDate.input.value;
-      const calcPromise = computeDateTo(parsedForDistance, dateFromNow, settings).then((res) => {
+      const calcPromise = computeDateTo(parsedForDistance, dateFromNow, settings).then(async (res) => {
         if (lastParsed !== parsedForDistance) return; // логист успел разобрать другое сообщение
         if (res.source === 'explicit') {
           fDateTo.input.value = res.dateTo;
           log(`Дата выгрузки взята прямо из сообщения: ${res.dateTo}.`);
         } else if (res.km) {
-          fDateTo.input.value = res.dateTo;
+          // Время выгрузки считаем той же формулой (расстояние + часовые пояса
+          // точек погрузки/выгрузки - см. computeArrivalTime), что и в
+          // computeDropPointDates ниже для маршрута с ОДНОЙ точкой выгрузки -
+          // для маршрута с доп. точками (extraStops) это только предварительная
+          // оценка "от двери до двери": настоящее время каждой точки по пути
+          // пересчитывается отдельно, по перегонам, прямо при заполнении сайта.
+          const arrival = await computeArrivalTime(fFrom.input.value, fTime.input.value, fTo.input.value, res.km, settings);
+          if (lastParsed !== parsedForDistance) return; // проверяем повторно - запрос был асинхронным
+          let dateTo = res.dateTo;
+          if (arrival.nextDay) dateTo = addDaysToDateStr(dateTo, 1);
+          fDateTo.input.value = dateTo;
+          fTimeTo.input.value = arrival.timeStr;
           const label = res.source === 'declared' ? 'по расстоянию из сообщения' : 'по расчётному расстоянию (по прямой ×1.3)';
-          log(`Дата выгрузки уточнена ${label}: ~${res.km} км → ${res.dateTo}. Проверьте и поправьте при необходимости.`);
+          log(`Дата и время выгрузки уточнены ${label}: ~${res.km} км → ${dateTo} ${arrival.timeStr}. Проверьте и поправьте при необходимости.`);
         } else {
           const reasonTxt = res.reason ? ` (${res.reason})` : '';
-          log(`⚠️ Не удалось оценить расстояние маршрута${reasonTxt} - дата выгрузки оставлена равной дате погрузки, проверьте вручную.`);
+          log(`⚠️ Не удалось оценить расстояние маршрута${reasonTxt} - дата и время выгрузки оставлены равными дате и времени погрузки, проверьте вручную.`);
         }
       }).catch(() => {}).then(() => {
         // Сбрасываем pendingDateToCalc, ТОЛЬКО если это всё ещё тот самый расчёт
@@ -2637,6 +2665,7 @@ ${text}
       // Сразу - быстрый запасной вариант (часы этого компьютера +3ч), часовой
       // пояс города погрузки уточнится асинхронно ниже (recomputeLoadTime).
       fTime.input.value = pickTime(lastParsed, settings, fDate.input.value, null);
+      fTimeTo.input.value = fTime.input.value; // уточнится ниже по расстоянию маршрута вместе с датой выгрузки
       fPrice.input.value = lastParsed.price.amount || '';
       // Ставка перевозчика (сколько получит привлечённый транспорт) - по
       // умолчанию -10% от цены клиента, округлённые вниз до 1000 руб (см.
@@ -2807,6 +2836,7 @@ ${text}
       // Сразу - быстрый запасной вариант, часовой пояс уточнится асинхронно
       // ниже (recomputeLoadTime), как и в обычном regex-разборе.
       fTime.input.value = pickTime({ time: { exact: order.time, before: null, from: null, after: null } }, settings, fDate.input.value, null);
+      fTimeTo.input.value = fTime.input.value; // уточнится ниже по расстоянию маршрута вместе с датой выгрузки
       // Диспетчеры часто пишут ставку сокращённо ("80" вместо "80 000 руб.") -
       // тот же приём, что и в обычном regex-разборе (см. extractPrice): если
       // число меньше 1000, это явно тысячи рублей, а не рубли буквально.
@@ -3078,6 +3108,7 @@ ${text}
           return fDate.input.value.trim() === lastParsed.dates[0].date ? windowTo : null;
         })(),
         time: fTime.input.value.trim(),
+        timeTo: fTimeTo.input.value.trim(),
         priceAmount: parseFloat(fPrice.input.value) || null,
         invitedFleetPrice: parseFloat(fInvitedPrice.input.value) || 1,
         vat: fVat.input.value.trim().toLowerCase() === 'нет' ? false : true,
@@ -3157,7 +3188,7 @@ ${text}
 
     clearBtn.onclick = () => {
       textarea.value = '';
-      [fFrom, fTo, fExtraStops, fDate, fDateTo, fTime, fPrice, fInvitedPrice, fVat, fWeight, fCargoType, fClient, fContactName, fContactPhone]
+      [fFrom, fTo, fExtraStops, fDate, fTime, fDateTo, fTimeTo, fPrice, fInvitedPrice, fVat, fWeight, fCargoType, fClient, fContactName, fContactPhone]
         .forEach(f => { f.input.value = ''; });
       fVehicles.input.value = '1';
       applyVehicleCountRestrictionToDangerousActions();
