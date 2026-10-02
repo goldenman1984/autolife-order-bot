@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Автолайф: заявка -> заказ на CargoRun
 // @namespace    autolife.cargorun.orderbot
-// @version      1.28.0
+// @version      1.29.0
 // @description  Теперь скрипт распространяется через GitHub (goldenman1984/autolife-order-bot) с автообновлением - Tampermonkey сам подхватывает новые версии, переустанавливать вручную у каждого логиста не нужно. Вставляешь сообщение от логиста (текст) - скрипт распознаёт маршрут/цену/дату/ТС и сам заполняет форму "Новый заказ" на loads.cargorun.ru. По умолчанию финальный клик "Запустить в работу"/"Сохранить черновик" всегда делает человек; по явным галочкам и подтверждению скрипт может сам нажать "Запустить в работу" и/или "Синхронизировать" с АТИ. Кнопка "Запустить в работу" (и своя, и настоящая на сайте) всегда заблокирована, если дата погрузки не прошла проверку на правдоподобность. При количестве ТС больше 1 галочки "Запустить в работу" и "Синхронизировать с АТИ" в окне заявки недоступны (сайт не поддерживает запуск в работу для нескольких ТС сразу) - если были включены, автоматически снимаются; в этом случае заказ сохраняется на сайте как черновик вручную. Для Москвы и Санкт-Петербурга без точного адреса подставляется известный адрес по умолчанию, а если точный адрес есть в самом сообщении - ИИ-разбор теперь использует именно его (в списке "Несколько заказов" при этом показывается короткое название города, а не весь адрес). Поле "Тип груза" заполняется из закрытого списка сайта (с запасным вариантом "ТНП"). ИИ-разбор (YandexGPT) выдерживает сообщения с большим числом отдельных заказов сразу (например, прайс-лист на много направлений). Комментарий на сайте больше не содержит цифру с ценой (её видит перевозчик/водитель) - включая "голую" цену без "тр"/"руб"/"ндс" рядом. Расчёт расстояния маршрута теперь устойчивее к временным сбоям геокодера и объясняет причину в логе, если не удалось. При включённой галочке "Синхронизировать с АТИ" отображение заказа выставляется "Всем перевозчикам" вместо "Выбранным перевозчикам". Два дня недели подряд через дефис без чисел ("на чт-пт"), а теперь и два числа дня подряд через дефис с одним месяцем на двоих ("02-03.10"), распознаются как ОКНО для погрузки (годится любой из двух дней), а не как пара дат погрузка/выгрузка - и в обычном разборе, и через ИИ; если после такого окна в сообщении отдельно названа ещё одна дата (например "02-03.10 ... 06.10") - именно она берётся как дата выгрузки, а не второе число окна. При 3+ точках маршрута (погрузка + несколько точек выгрузки) дата каждой следующей точки выгрузки считается по расстоянию от ПРЕДЫДУЩЕЙ точки маршрута последовательно (а не одним прыжком от погрузки сразу до последней точки). Время на КАЖДОЙ точке выгрузки (включая единственную точку) считается по расстоянию перегона (700 км/сутки), часовому поясу места прибытия и времени на ПРР на предыдущей точке (по умолчанию 4ч - на столько позже фактического прибытия машина трогается дальше), а не копируется время погрузки; расчётное время вне разумного окна разгрузки [8:00, 19:00) выравнивается на границу этого окна (вечер/ночь - 8:00 следующего дня, раннее утро - 8:00 того же дня). В окне заявки появилось поле "Тип загрузки" (Задняя/Боковая/Верхняя/Полная растентовка, взаимоисключающие галочки, "Задняя" по умолчанию) - выбор автоматически проставляется на сайте в поле "Выберите тип загрузки" ТОЛЬКО в первой точке маршрута (точке погрузки); если отмечен тип прицепа Рефрижератор или Изотерм - тип загрузки можно выбрать только "Задняя" (остальные варианты блокируются). Вариант типа прицепа, который раньше назывался в окне заявки просто "Тент", теперь называется "Тент 92м3" (на сайте по-прежнему подставляется просто "Тент" - это название не менялось). "Тент 110 м3" теперь несовместим ни с одним другим типом прицепа - отметка любого другого типа (Тент 92м3/Рефрижератор/Изотерм) автоматически снимает "Тент 110 м3", и наоборот; остальные типы между собой по-прежнему можно комбинировать. Для даты погрузки, когда в сообщении названо ОКНО из двух дней (диапазон дней недели "чт-пт", числовой диапазон "02-03.10" или обычное "или" между двумя датами), скрипт использует настоящий интервал на сайте (галочка "Выбрать период прибытия" + поле "Дата въезда, до") вместо того, чтобы подставлять одну "ближайшую" дату - теперь это работает И через ИИ-разбор (YandexGPT), а не только при обычном разборе; дата "до" интервала ставится с временем 19:00 (а не временем погрузки, как раньше).
 // @match        https://loads.cargorun.ru/*
 // @run-at       document-idle
@@ -2105,7 +2105,7 @@ ${text}
     await sleep(200);
     log(`Заполняю точку загрузки: ${data.from}...`);
     await fillAddress('location0', data.from, log);
-    await setDateTime('planEnterTime0', data.date, data.time, log, data.dateWindowTo ? `${data.dateWindowTo} ${ARRIVAL_PERIOD_END_TIME}` : null);
+    await setDateTime('planEnterTime0', data.date, data.time, log, data.dateWindowTo ? `${data.dateWindowTo} ${data.dateWindowToTime || ARRIVAL_PERIOD_END_TIME}` : null);
     await fillAtiCity(0, data.from, log);
 
     // Тип загрузки (см. LOADING_TYPE_CHECKBOX_OPTIONS выше) - ставится ТОЛЬКО
@@ -2312,6 +2312,37 @@ ${text}
       return { wrap, input };
     }
 
+    // "Голое" поле - просто <input>, без своей подписи и обёртки (подпись
+    // будет общей на двоих у пары дата+время, см. pairField ниже). Вся
+    // остальная логика скрипта как читала/писала .input у обычных field(), так
+    // и продолжает читать/писать .input у этих - значения даты и времени
+    // остаются двумя отдельными строками, меняется только то, как они
+    // нарисованы в окне (Ramil попросил объединить дату и время в одно поле).
+    function bareField(inputAttrs) {
+      const input = el('input', inputAttrs);
+      return { wrap: input, input };
+    }
+
+    // Визуально объединяет два "голых" поля (обычно дата + время) в одно поле
+    // с ОДНОЙ подписью и рамкой - логист видит и правит и то, и другое рядом,
+    // как единое целое, хотя внутри это по-прежнему два независимых <input>
+    // (так безопаснее: вся остальная логика скрипта - проверка даты на
+    // правдоподобность, расчёт времени по расстоянию и т.п. - продолжает
+    // работать с чистыми отдельными строками "дд.мм.гггг" и "чч:мм", не
+    // разбирая их из одной строки заново).
+    function pairField(labelText, first, second) {
+      const wrap = el('div');
+      wrap.appendChild(el('label', { text: labelText }));
+      const row = el('div', { style: 'display:flex;gap:6px;' });
+      first.input.style.flex = '3';
+      second.input.style.flex = '2';
+      row.appendChild(first.input);
+      row.appendChild(second.input);
+      wrap.appendChild(row);
+      wrap.style.gridColumn = '1 / -1';
+      return wrap;
+    }
+
     // Чекбоксы типа прицепа (см. TRAILER_CHECKBOX_OPTIONS) - вместо текстового
     // поля, чтобы логист мог просто отметить нужные варианты (можно сразу
     // несколько), не гадая, как именно называется вариант на сайте.
@@ -2427,15 +2458,24 @@ ${text}
     const fFrom = field('Откуда (город)', { type: 'text' });
     const fTo = field('Куда (город, конечная точка)', { type: 'text' });
     const fExtraStops = field('Доп. точки выгрузки (через ;), по пути к конечной', { type: 'text' });
-    // На всю ширину сетки - чтобы следующая за ней пара "Дата/Время погрузки"
-    // (и следом "Дата/Время выгрузки") начиналась с чистой строки и дата с
-    // временем всегда стояли рядом друг с другом, а не вперемешку со
-    // смещением на одну ячейку (Ramil попросил расположить дату и время рядом).
+    // На всю ширину сетки - чтобы следующие за ней поля "Дата и время
+    // погрузки/выгрузки" начинались с чистой строки (см. pairField выше).
     fExtraStops.wrap.style.gridColumn = '1 / -1';
-    const fDate = field('Дата погрузки (дд.мм.гггг)', { type: 'text' });
-    const fTime = field('Время погрузки (чч:мм)', { type: 'text' });
-    const fDateTo = field('Дата выгрузки (дд.мм.гггг)', { type: 'text' });
-    const fTimeTo = field('Время выгрузки (чч:мм)', { type: 'text' });
+    const fDate = bareField({ type: 'text', placeholder: 'дд.мм.гггг' });
+    const fTime = bareField({ type: 'text', placeholder: 'чч:мм' });
+    const fDateTo = bareField({ type: 'text', placeholder: 'дд.мм.гггг' });
+    const fTimeTo = bareField({ type: 'text', placeholder: 'чч:мм' });
+    // Интервал (окно) погрузки "от"/"до" - см. loadingDateWindowTo/
+    // ARRIVAL_PERIOD_END_TIME выше: раньше вторая дата окна считалась только
+    // "внутри" скрипта и нигде логисту не показывалась - теперь видна и
+    // редактируема, как и остальные даты/время (Ramil попросил вывести её в
+    // форму). fWindowTo пустое - окна в сообщении нет, заполняем как обычно
+    // одной датой погрузки.
+    const fWindowTo = bareField({ type: 'text', placeholder: 'дд.мм.гггг' });
+    const fWindowToTime = bareField({ type: 'text', placeholder: 'чч:мм' });
+    const loadPairWrap = pairField('Дата и время погрузки', fDate, fTime);
+    const unloadPairWrap = pairField('Дата и время выгрузки', fDateTo, fTimeTo);
+    const windowPairWrap = pairField('Интервал погрузки до (если есть окно дат)', fWindowTo, fWindowToTime);
     const fPrice = field('Стоимость заказа, руб', { type: 'number' });
     const fInvitedPrice = field('Ставка перевозчика, руб', { type: 'number' });
     const fVat = field('НДС (да/нет)', { type: 'text' });
@@ -2500,7 +2540,9 @@ ${text}
     fVehicles.input.addEventListener('input', applyVehicleCountRestrictionToDangerousActions);
     applyVehicleCountRestrictionToDangerousActions();
 
-    [fFrom, fTo, fExtraStops, fDate, fTime, fDateTo, fTimeTo, fPrice, fInvitedPrice, fVat, fTrailer, fLoadingType, fWeight, fCargoType, fVehicles, fClient, fContactName, fContactPhone]
+    [fFrom, fTo, fExtraStops].forEach(f => grid.appendChild(f.wrap));
+    [loadPairWrap, unloadPairWrap, windowPairWrap].forEach(w => grid.appendChild(w));
+    [fPrice, fInvitedPrice, fVat, fTrailer, fLoadingType, fWeight, fCargoType, fVehicles, fClient, fContactName, fContactPhone]
       .forEach(f => grid.appendChild(f.wrap));
     grid.appendChild(fDanger.wrap);
 
@@ -2702,6 +2744,10 @@ ${text}
       fContactName.input.value = settings.contactName || '';
       fContactPhone.input.value = settings.contactPhone || '';
       logBox.textContent = '';
+      // Сбрасываем поле "Интервал погрузки до" перед разбором - заполнится
+      // заново ниже, только если в сообщении реально есть окно дат.
+      fWindowTo.input.value = '';
+      fWindowToTime.input.value = '';
       if (lastParsed.dates.length > 1 && lastParsed.datesAreAlternative) {
         // Если среди дат есть ОТДЕЛЬНО названная дата выгрузки (см.
         // hasExplicitDateTo - например "02-03.10 ... 06.10"), в список
@@ -2711,9 +2757,14 @@ ${text}
         const windowDates = hasExplicitDateTo(lastParsed) ? lastParsed.dates.slice(0, -1) : lastParsed.dates;
         // Ramil попросил использовать настоящий интервал дат на сайте
         // (galочка "Выбрать период прибытия") вместо того, чтобы гадать одну
-        // "ближайшую" дату - см. loadingDateWindowTo/setDateTime. Сообщаем об
-        // этом в логе вместо прежнего "проверьте поле Дата вручную".
-        log(`ℹ️ В сообщении окно для погрузки: ${windowDates.map(d => d.date).join(' или ')} - при заполнении на сайте будет указан период прибытия (от ${windowDates[0].date} до ${windowDates[windowDates.length - 1].date}), галочка "Выбрать период прибытия" выставится автоматически. Проверьте поле "Дата".`);
+        // "ближайшую" дату - см. loadingDateWindowTo/setDateTime. Поле "Интервал
+        // погрузки до" показывает и позволяет поправить вторую (более
+        // позднюю) дату окна и время её применения на сайте (по умолчанию
+        // конец рабочего дня, ARRIVAL_PERIOD_END_TIME) - если логист очистит
+        // это поле вручную, окно применяться не будет, заполнится одна дата.
+        fWindowTo.input.value = windowDates[windowDates.length - 1].date;
+        fWindowToTime.input.value = ARRIVAL_PERIOD_END_TIME;
+        log(`ℹ️ В сообщении окно для погрузки: ${windowDates.map(d => d.date).join(' или ')} - при заполнении на сайте будет указан период прибытия (от ${windowDates[0].date} до ${windowDates[windowDates.length - 1].date}), галочка "Выбрать период прибытия" выставится автоматически. Проверьте поля "Дата и время погрузки" и "Интервал погрузки до".`);
       } else if (lastParsed.dates.length > 1 && lastParsed.datesAreMultiOrder) {
         log(`⚠️ В сообщении ${lastParsed.dates.length} разных даты (${lastParsed.dates.map(d => d.date).join(', ')}) - похоже, это ОТДЕЛЬНЫЕ заказы на разные дни, а не диапазон погрузка/выгрузка одного заказа. Выберите дату для этого заказа в списке ниже, заполните и сохраните его на сайте, затем откройте окно заново на то же сообщение и выберите следующую дату.`);
       } else if (lastParsed.dates.length > 1) {
@@ -2820,7 +2871,12 @@ ${text}
         aiDateWindowTo = weekdayOverride.dateWindowTo;
       }
       if (aiDateWindowTo) {
-        dateWarnings.push(`ℹ️ ИИ распознал окно для погрузки: ${aiDate} или ${aiDateWindowTo} - при заполнении на сайте будет указан период прибытия (от ${aiDate} до ${aiDateWindowTo}), галочка "Выбрать период прибытия" выставится автоматически.`);
+        dateWarnings.push(`ℹ️ ИИ распознал окно для погрузки: ${aiDate} или ${aiDateWindowTo} - при заполнении на сайте будет указан период прибытия (от ${aiDate} до ${aiDateWindowTo}), галочка "Выбрать период прибытия" выставится автоматически. Проверьте поле "Интервал погрузки до".`);
+        fWindowTo.input.value = aiDateWindowTo;
+        fWindowToTime.input.value = ARRIVAL_PERIOD_END_TIME;
+      } else {
+        fWindowTo.input.value = '';
+        fWindowToTime.input.value = '';
       }
       fDate.input.value = aiDate;
       fDateTo.input.value = aiDateTo;
@@ -3095,18 +3151,15 @@ ${text}
         // явной даты нет, дату КОНЕЧНОЙ точки тоже считаем по расстоянию
         // перегона от последней промежуточной точки, а не оставляем как есть.
         dateToIsExplicit: hasExplicitDateTo(lastParsed),
-        // Окно/диапазон для даты ПОГРУЗКИ (см. loadingDateWindowTo выше) -
-        // используется в fillOrderOnSite, чтобы вместо одной "ближайшей" даты
-        // указать на сайте настоящий интервал ("Дата въезда, от"/"до"). Если
-        // логист уже успел вручную поменять поле "Дата" после "Распознать" (и
-        // оно больше не равно более ранней дате окна из lastParsed) - окно
-        // больше не актуально, лучше одна (поправленная вручную) дата, чем
-        // неверный интервал.
-        dateWindowTo: (() => {
-          const windowTo = loadingDateWindowTo(lastParsed);
-          if (!windowTo) return null;
-          return fDate.input.value.trim() === lastParsed.dates[0].date ? windowTo : null;
-        })(),
+        // Окно/диапазон для даты ПОГРУЗКИ - используется в fillOrderOnSite,
+        // чтобы вместо одной "ближайшей" даты указать на сайте настоящий
+        // интервал ("Дата въезда, от"/"до"). Раньше считалось заново из
+        // lastParsed прямо здесь; теперь логист видит и может поправить (или
+        // очистить) это поле "Интервал погрузки до" в окне заявки напрямую -
+        // доверяем ему, как и остальным датам/времени. Пустое поле = окна нет,
+        // заполняем одну дату погрузки, как обычно.
+        dateWindowTo: fWindowTo.input.value.trim() || null,
+        dateWindowToTime: fWindowToTime.input.value.trim() || ARRIVAL_PERIOD_END_TIME,
         time: fTime.input.value.trim(),
         timeTo: fTimeTo.input.value.trim(),
         priceAmount: parseFloat(fPrice.input.value) || null,
@@ -3188,7 +3241,7 @@ ${text}
 
     clearBtn.onclick = () => {
       textarea.value = '';
-      [fFrom, fTo, fExtraStops, fDate, fTime, fDateTo, fTimeTo, fPrice, fInvitedPrice, fVat, fWeight, fCargoType, fClient, fContactName, fContactPhone]
+      [fFrom, fTo, fExtraStops, fDate, fTime, fDateTo, fTimeTo, fWindowTo, fWindowToTime, fPrice, fInvitedPrice, fVat, fWeight, fCargoType, fClient, fContactName, fContactPhone]
         .forEach(f => { f.input.value = ''; });
       fVehicles.input.value = '1';
       applyVehicleCountRestrictionToDangerousActions();
